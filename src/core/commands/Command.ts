@@ -1,8 +1,10 @@
-import type { MeshDocument } from '../mesh/MeshDocument';
 import type { SceneGraph } from '../scene-graph/SceneGraph';
+import type { MeshesRecord } from '@/systems/scene/sceneObjectHelpers';
 
 export interface EditorSnapshot {
-  mesh: MeshDocument;
+  meshes: MeshesRecord;
+  activeMeshId: string;
+  selectedNodeIds: string[];
   sceneGraph: ReturnType<SceneGraph['toJSON']>;
 }
 

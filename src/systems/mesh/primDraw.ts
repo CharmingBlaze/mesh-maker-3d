@@ -7,6 +7,7 @@ import type { Vec3 } from '@/core/math/Vec3';
 import type { PrimitiveType } from '@/systems/mesh/primitives';
 
 export type PrimDrawPhase = 'base' | 'extent';
+export type PrimPlacementSource = 'click' | 'drag' | null;
 
 export interface PrimDrawState {
   type: PrimitiveType;
@@ -18,16 +19,17 @@ export interface PrimDrawState {
   bounds: BoundingBox;
   anchor: Vec3 | null;
   cursor: Vec3 | null;
+  placementSource: PrimPlacementSource;
 }
 
 export const PRIM_DRAW_HINTS: Record<PrimDrawPhase, string> = {
-  base: 'Drag base box on view · shape shown inside · Esc cancel',
-  extent: 'Drag height/depth · box + shape update · Esc cancel',
+  base: 'Click = default size · Drag = custom footprint · Esc cancel',
+  extent: 'Scroll = height · Drag handles to adjust · Enter or Place to commit · Esc cancel',
 };
 
 export const PRIM_DRAW_HINTS_3D: Record<PrimDrawPhase, string> = {
-  base: 'Drag base on ground (XZ) · CAD box + shape inside',
-  extent: 'Drag height (Y) · box + shape inside · Esc cancel',
+  base: 'Click = default on ground · Drag footprint on XZ · Esc cancel',
+  extent: 'Scroll = height · Drag handles · Enter or Place to commit · Esc cancel',
 };
 
 export function viewPlaneAxes(vp: View2DKey): ['x' | 'y' | 'z', 'x' | 'y' | 'z'] {
@@ -51,6 +53,7 @@ export function createPrimDrawState(type: PrimitiveType): PrimDrawState {
     bounds: boundsFromCorners({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
     anchor: null,
     cursor: null,
+    placementSource: null,
   };
 }
 
@@ -91,13 +94,26 @@ export function applyBaseDrag3D(draw: PrimDrawState, p0: Vec3, p1: Vec3): PrimDr
 
 export function applyExtentDrag(draw: PrimDrawState, p0: Vec3, p1: Vec3): PrimDrawState {
   const axis = draw.extentAxis;
-  const lo = Math.min(p0[axis], p1[axis]);
-  const hi = Math.max(p0[axis], p1[axis]);
-  const bounds = {
-    min: { ...draw.bounds.min, [axis]: lo },
-    max: { ...draw.bounds.max, [axis]: hi },
+  const minVal = draw.bounds.min[axis];
+  const currentMax = draw.bounds.max[axis];
+  const cursorMax = Math.max(minVal, p1[axis]);
+  const startedFromTop = p0[axis] >= currentMax - 1e-3;
+  let maxVal: number;
+  if (cursorMax >= currentMax) {
+    maxVal = cursorMax;
+  } else if (startedFromTop) {
+    maxVal = cursorMax;
+  } else {
+    maxVal = currentMax;
+  }
+  return {
+    ...draw,
+    bounds: {
+      min: { ...draw.bounds.min, [axis]: minVal },
+      max: { ...draw.bounds.max, [axis]: maxVal },
+    },
+    cursor: p1,
   };
-  return { ...draw, bounds, cursor: p1 };
 }
 
 export function previewBounds(draw: PrimDrawState): BoundingBox | null {

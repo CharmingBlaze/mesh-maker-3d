@@ -1,5 +1,6 @@
 import { MenuBar } from '@/components/layout/MenuBar';
 import { FileBridge } from '@/components/layout/FileBridge';
+import { PrimDrawHUD } from '@/components/layout/PrimDrawHUD';
 import { StatusBar } from '@/components/layout/StatusBar';
 import SidePanel from '@/components/panels/SidePanel';
 import { ViewportArea } from '@/components/viewports/ViewportArea';
@@ -18,6 +19,7 @@ export default function App() {
       <div className={`app-main ${maximizedVP ? 'app-main--maximized' : ''}`}>
         <ViewportArea />
         <SidePanel />
+        <PrimDrawHUD />
       </div>
       <StatusBar />
       <Modal />

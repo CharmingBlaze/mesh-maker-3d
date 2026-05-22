@@ -60,6 +60,22 @@ export function buildPrimitiveMeshInBounds(
   };
 }
 
+import { ensureLayerData } from '@/systems/layers/layerSystem';
+import { centerMeshAtOrigin } from '@/systems/scene/sceneObjectHelpers';
+
+export function createPrimitiveMeshDocument(
+  type: PrimitiveType,
+  bounds: BoundingBox,
+  baseView: PrimDrawView,
+  name: string,
+): { mesh: MeshDocument; worldCenter: Vec3 } {
+  const mesh = createMeshDocument(name);
+  addPrimitiveForDraw(mesh, type, bounds, baseView, 0);
+  ensureLayerData(mesh);
+  const worldCenter = centerMeshAtOrigin(mesh);
+  return { mesh, worldCenter };
+}
+
 export function addPrimitiveForDraw(
   doc: MeshDocument,
   type: PrimitiveType,

@@ -88,7 +88,7 @@ export function tryStartModelingDrag(
   drag.isDragging = true;
 
   if (tool === 'extrude' && state.selFaces.size > 0) {
-    const session = prepareExtrude(state.mesh, state.selFaces, state.groupSel);
+    const session = prepareExtrude(state.getActiveMesh(), state.selFaces, state.groupSel);
     if (!session) {
       drag.isDragging = false;
       drag.beforeSnapshot = null;
@@ -145,14 +145,15 @@ export function applyModelingPreview(
 
   if (tool === 'extrude' && drag.extrudeSession && drag.preparedSnapshot) {
     state.applySnapshot(drag.preparedSnapshot);
-    applyExtrudeDistance(state.mesh, drag.extrudeSession, amount);
+    applyExtrudeDistance(state.getActiveMesh(), drag.extrudeSession, amount);
     state.notifyChange();
     return;
   }
 
   if (!drag.preparedSnapshot) return;
   state.applySnapshot(drag.preparedSnapshot);
-  const { mesh, groupSel, selFaces, selEdges } = state;
+  const mesh = state.getActiveMesh();
+  const { groupSel, selFaces, selEdges } = state;
 
   if (tool === 'inset' && selFaces.size > 0) {
     meshOps.insetFaces(mesh, selFaces, groupSel, amount);

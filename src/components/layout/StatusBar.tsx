@@ -1,6 +1,6 @@
 import { MODE_HINTS, useEditorStore, TOOL_HINTS } from '@/store/editorStore';
 import { meshStats } from '@/core/mesh/MeshDocument';
-import { useMeshDocument } from '@/hooks/useSceneRevision';
+import { useMeshDocument, useSceneObjectCount } from '@/hooks/useSceneRevision';
 import { PRIM_DRAW_HINTS, PRIM_DRAW_HINTS_3D } from '@/systems/mesh/primDraw';
 import { formatSnapSize } from '@/systems/viewport/snapGrid';
 
@@ -8,6 +8,8 @@ export function StatusBar() {
   const tool = useEditorStore((s) => s.tool);
   const selectionMode = useEditorStore((s) => s.selectionMode);
   const mesh = useMeshDocument();
+  const objectCount = useSceneObjectCount();
+  const selectedNodeIds = useEditorStore((s) => s.selectedNodeIds);
   const selVerts = useEditorStore((s) => s.selVerts);
   const selEdges = useEditorStore((s) => s.selEdges);
   const selFaces = useEditorStore((s) => s.selFaces);
@@ -30,12 +32,14 @@ export function StatusBar() {
   const hint = maximizedVP
     ? `${viewNames[maximizedVP]} — fullscreen (Space to restore)`
     : primDraw
-    ? `${primDraw.type.toUpperCase()}: ${
-        activeVP === '3d' ? PRIM_DRAW_HINTS_3D[primDraw.phase] : PRIM_DRAW_HINTS[primDraw.phase]
-      }`
-    : tool === 'select'
-      ? MODE_HINTS[selectionMode]
-      : TOOL_HINTS[tool];
+      ? `${primDraw.type.toUpperCase()}: ${
+          primDraw.baseView === '3d'
+            ? PRIM_DRAW_HINTS_3D[primDraw.phase]
+            : PRIM_DRAW_HINTS[primDraw.phase]
+        }`
+      : tool === 'select'
+        ? MODE_HINTS[selectionMode]
+        : TOOL_HINTS[tool];
 
   return (
     <div className="statusbar">
@@ -55,10 +59,16 @@ export function StatusBar() {
         </span>
       </div>
       <div className="sb-item">
-        Selection: <span>{selVerts.size}v {selEdges.size}e {selFaces.size}f</span>
+        Selection:{' '}
+        <span>
+          {selectionMode === 'object'
+            ? `${selectedNodeIds.size} layer scene${selectedNodeIds.size === 1 ? '' : 's'}`
+            : `${selVerts.size}v ${selEdges.size}e ${selFaces.size}f`}
+        </span>
       </div>
       <div className="sb-item">
-        Scene: <span>{stats.verts}v {stats.faces}f</span>
+        Active: <span>{mesh.name}</span> · Layer scenes: <span>{objectCount}</span> ·{' '}
+        <span>{stats.verts}v {stats.faces}f</span>
       </div>
       <div className="sb-item sb-project">
         {projectFileName ?? 'Untitled'}

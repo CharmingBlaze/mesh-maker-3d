@@ -5,12 +5,13 @@ import { CommandHistory } from '@/core/commands/CommandHistory';
 import { SnapshotCommand, type EditorSnapshot } from '@/core/commands/Command';
 import { editorEvents } from '@/core/events/EventBus';
 import type { PrimitiveType } from '@/systems/mesh/primitives';
-import { addPrimitiveForDraw } from '@/systems/mesh/primitiveFromBounds';
+import { createPrimitiveMeshDocument } from '@/systems/mesh/primitiveFromBounds';
 import { createPrimDrawState, type PrimDrawState } from '@/systems/mesh/primDraw';
+import { canCommitPrimDraw } from '@/hooks/primDrawHelpers';
 import { enforceMinSize } from '@/core/math/BoundingBox';
 import * as meshOps from '@/systems/mesh/meshOperations';
 import { exportOBJ, exportSTL, exportPLY, exportGLTF } from '@/systems/export/exporters';
-import { serializeProject, type ProjectFileV1 } from '@/systems/io/projectFormat';
+import { serializeProject, type ProjectFileV2 } from '@/systems/io/projectFormat';
 import {
   defaultProjectName,
   downloadText,
@@ -18,12 +19,28 @@ import {
 } from '@/systems/io/fileAccess';
 import { PROJECT_EXTENSION, PROJECT_MIME } from '@/systems/io/projectFormat';
 import { importFile } from '@/systems/import/importRouter';
-import { meshBounds } from '@/core/mesh/meshBounds';
-import { frame2DViewports } from '@/systems/viewport/viewportFrame';
+import {
+  addMeshToScene,
+  cloneMeshesRecord,
+  getMeshForNode,
+  getMeshNodes,
+  getNodeForMeshId,
+  meshesFromArray,
+  meshesToArray,
+  nextObjectName,
+  removeMeshFromScene,
+  sceneWorldBounds,
+  type MeshesRecord,
+} from '@/systems/scene/sceneObjectHelpers';
+import {
+  pickSceneObject2D,
+  pickSceneObject3D,
+  toggleNodeSelection,
+} from '@/systems/scene/scenePick';
+import { frame2DViewports, frame2DViewportsFromBounds } from '@/systems/viewport/viewportFrame';
 import type { View2DKey } from '@/core/math/projection';
 import type { ViewportLayoutId } from '@/systems/viewport/viewportLayout';
 import {
-  assignNewGeometryToActiveLayer,
   createLayer,
   editableFaceIndices,
   editableVertexIndices,
@@ -37,6 +54,7 @@ import {
   effectiveSelectionMode,
   getDeleteTargets,
   hasDeletableSelection,
+  isAdditiveSelection,
   type ScreenRect,
   parseEdgeKey,
   uniqueMeshEdges,
@@ -45,7 +63,7 @@ import {
 } from '@/systems/selection/selectionSystem';
 import { applyClickSelection3D, boxSelect3D } from '@/systems/viewport/pick3D';
 import { clampSnapSize, snapScalar } from '@/systems/viewport/snapGrid';
-import type * as THREE from 'three';
+import * as THREE from 'three';
 
 export type ToolId =
   | 'select'
@@ -74,7 +92,7 @@ export const TOOL_HINTS: Record<ToolId, string> = {
 };
 
 export const MODE_HINTS: Record<SelectionMode, string> = {
-  object: 'Object mode: click the model to select the whole mesh',
+  object: 'Object mode: click layer scenes to select · Move/Rotate/Scale transforms the whole layer scene',
   vertex: 'Vertex mode: click to chain/build mesh · drag to move · Shift/Ctrl = add/remove from selection',
   edge: 'Edge mode: select and transform connected edge endpoints',
   face: 'Click face to select · Drag box = marquee multi-select · Shift/Ctrl add/remove',
@@ -93,7 +111,9 @@ export interface ModalState {
 }
 
 interface EditorState {
-  mesh: MeshDocument;
+  meshes: MeshesRecord;
+  activeMeshId: string;
+  selectedNodeIds: Set<string>;
   sceneGraph: SceneGraph;
   history: CommandHistory;
 
@@ -146,7 +166,27 @@ interface EditorState {
   saveProject: () => Promise<void>;
   saveProjectAs: () => Promise<void>;
   centerAllViews: () => void;
-  applyProject: (project: ProjectFileV1, fileName: string | null) => void;
+  applyProject: (project: ProjectFileV2, fileName: string | null) => void;
+
+  getActiveMesh: () => MeshDocument;
+  setActiveMesh: (meshId: string) => void;
+  selectSceneNode: (nodeId: string, shiftKey?: boolean, ctrlKey?: boolean) => void;
+  setSelectedNodeIds: (ids: Set<string>) => void;
+  deleteSelectedObjects: () => void;
+  duplicateSelectedObjects: () => void;
+  renameSceneNode: (nodeId: string, name: string) => void;
+  toggleSceneNodeVisible: (nodeId: string) => void;
+  toggleSceneNodeLocked: (nodeId: string) => void;
+  getMeshForNode: (nodeId: string) => MeshDocument | null;
+  applyObjectClickSelection: (
+    vpKey: View2DKey | '3d',
+    sx: number,
+    sy: number,
+    shiftKey: boolean,
+    ctrlKey?: boolean,
+    camera?: THREE.PerspectiveCamera,
+    canvas?: HTMLCanvasElement,
+  ) => void;
 
   selectAll: () => void;
   deselectAll: () => void;
@@ -264,24 +304,52 @@ const defaultVp2d = (): Record<View2DKey, Viewport2DState> => ({
   side: { pan: { x: 240, y: 240 }, zoom: 1 },
 });
 
+function syncLayerStateFromMesh(mesh: MeshDocument): { layers: LayerState[]; activeLayer: number } {
+  ensureLayerData(mesh);
+  return {
+    layers: mesh.layers,
+    activeLayer: Math.max(0, mesh.layers.findIndex((l) => l.id === mesh.activeLayerId)),
+  };
+}
+
+function commitActiveMesh(mesh: MeshDocument): void {
+  useEditorStore.setState((s) => ({
+    meshes: { ...s.meshes, [mesh.id]: mesh },
+    ...syncLayerStateFromMesh(mesh),
+  }));
+}
+
 function createInitialState(): Pick<
   EditorState,
-  'mesh' | 'sceneGraph' | 'history' | 'selVerts' | 'selEdges' | 'selFaces' | 'vp2d' | 'layers' | 'activeLayer'
+  | 'meshes'
+  | 'activeMeshId'
+  | 'selectedNodeIds'
+  | 'sceneGraph'
+  | 'history'
+  | 'selVerts'
+  | 'selEdges'
+  | 'selFaces'
+  | 'vp2d'
+  | 'layers'
+  | 'activeLayer'
 > {
   const mesh = createMeshDocument();
   ensureLayerData(mesh);
   const sceneGraph = new SceneGraph();
-  sceneGraph.ensureMeshNode(mesh.id, mesh.name);
+  const meshes: MeshesRecord = { [mesh.id]: mesh };
+  addMeshToScene(sceneGraph, meshes, mesh);
+  const layerState = syncLayerStateFromMesh(mesh);
   return {
-    mesh,
+    meshes,
+    activeMeshId: mesh.id,
+    selectedNodeIds: new Set(),
     sceneGraph,
     history: new CommandHistory(50),
     selVerts: new Set(),
     selEdges: new Set(),
     selFaces: new Set(),
     vp2d: defaultVp2d(),
-    layers: mesh.layers,
-    activeLayer: 0,
+    ...layerState,
   };
 }
 
@@ -309,24 +377,223 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectDirty: false,
 
   getSnapshot: () => ({
-    mesh: cloneMeshDocument(get().mesh),
+    meshes: cloneMeshesRecord(get().meshes),
+    activeMeshId: get().activeMeshId,
+    selectedNodeIds: [...get().selectedNodeIds],
     sceneGraph: get().sceneGraph.toJSON(),
   }),
 
   applySnapshot: (s) => {
     const sceneGraph = SceneGraph.fromJSON(s.sceneGraph);
-    ensureLayerData(s.mesh);
+    const meshes = cloneMeshesRecord(s.meshes);
+    const activeMeshId = meshes[s.activeMeshId] ? s.activeMeshId : Object.keys(meshes)[0] ?? '';
+    const mesh = meshes[activeMeshId];
+    if (mesh) ensureLayerData(mesh);
+    const layerState = mesh ? syncLayerStateFromMesh(mesh) : { layers: [], activeLayer: 0 };
     set({
-      mesh: s.mesh,
+      meshes,
+      activeMeshId,
+      selectedNodeIds: new Set(s.selectedNodeIds),
       sceneGraph,
-      layers: s.mesh.layers,
-      activeLayer: Math.max(0, s.mesh.layers.findIndex((layer) => layer.id === s.mesh.activeLayerId)),
+      ...layerState,
       selVerts: new Set(),
       selEdges: new Set(),
       selFaces: new Set(),
       wipFace: [],
-      primDraw: null,
     });
+  },
+
+  getActiveMesh: () => {
+    const { meshes, activeMeshId } = get();
+    const mesh = meshes[activeMeshId];
+    if (!mesh) throw new Error('No active mesh');
+    return mesh;
+  },
+
+  setActiveMesh: (meshId) => {
+    const mesh = get().meshes[meshId];
+    if (!mesh) return;
+    const node = getNodeForMeshId(get().sceneGraph, meshId);
+    set({
+      activeMeshId: meshId,
+      selectedNodeIds: node ? new Set([node.id]) : new Set(),
+      ...syncLayerStateFromMesh(mesh),
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: new Set(),
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  getMeshForNode: (nodeId) => {
+    const node = get().sceneGraph.getNode(nodeId);
+    if (!node) return null;
+    return getMeshForNode(get().meshes, node);
+  },
+
+  setSelectedNodeIds: (ids) => {
+    set({ selectedNodeIds: ids });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  selectSceneNode: (nodeId, shiftKey = false, ctrlKey = false) => {
+    const node = get().sceneGraph.getNode(nodeId);
+    if (!node || node.type !== 'mesh' || !node.meshId) return;
+    const nextIds = toggleNodeSelection(get().selectedNodeIds, nodeId, shiftKey, ctrlKey);
+    const mesh = get().meshes[node.meshId];
+    if (!mesh) return;
+    set({
+      selectedNodeIds: nextIds,
+      activeMeshId: node.meshId,
+      ...syncLayerStateFromMesh(mesh),
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: new Set(),
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  applyObjectClickSelection: (vpKey, sx, sy, shiftKey, ctrlKey = false, camera, canvas) => {
+    const state = get();
+    let nodeId: string | null = null;
+    if (vpKey === '3d' && camera && canvas) {
+      const raycaster = new THREE.Raycaster();
+      const ndc = new THREE.Vector2();
+      nodeId = pickSceneObject3D(
+        state.sceneGraph,
+        state.meshes,
+        state.activeMeshId,
+        state.selectedNodeIds,
+        camera,
+        canvas,
+        raycaster,
+        ndc,
+        sx,
+        sy,
+      );
+    } else if (vpKey !== '3d') {
+      nodeId = pickSceneObject2D(
+        state.sceneGraph,
+        state.meshes,
+        state.activeMeshId,
+        state.selectedNodeIds,
+        vpKey,
+        state.vp2d[vpKey].pan,
+        state.vp2d[vpKey].zoom,
+        sx,
+        sy,
+      );
+    }
+    if (nodeId) {
+      state.selectSceneNode(nodeId, shiftKey, ctrlKey);
+    } else if (!isAdditiveSelection(shiftKey, ctrlKey)) {
+      set({ selectedNodeIds: new Set(), selVerts: new Set(), selEdges: new Set(), selFaces: new Set() });
+      editorEvents.emit('selection:changed', undefined);
+      get().notifyChange();
+    }
+  },
+
+  deleteSelectedObjects: () => {
+    const { selectedNodeIds, sceneGraph } = get();
+    const nodeIds = [...selectedNodeIds].filter((id) => sceneGraph.getNode(id)?.type === 'mesh');
+    if (nodeIds.length === 0) return;
+    get().runCommand('Delete Object', () => {
+      const st = get();
+      const meshes = { ...st.meshes };
+      const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
+      nodeIds.forEach((id) => removeMeshFromScene(sg, meshes, id));
+      let activeMeshId = st.activeMeshId;
+      if (!meshes[activeMeshId]) {
+        const remaining = getMeshNodes(sg);
+        activeMeshId = remaining[0]?.meshId ?? '';
+      }
+      const mesh = meshes[activeMeshId];
+      set({
+        meshes,
+        sceneGraph: sg,
+        activeMeshId,
+        selectedNodeIds: new Set(),
+        ...(mesh ? syncLayerStateFromMesh(mesh) : { layers: [], activeLayer: 0 }),
+        selVerts: new Set(),
+        selEdges: new Set(),
+        selFaces: new Set(),
+        wipFace: [],
+      });
+    });
+  },
+
+  duplicateSelectedObjects: () => {
+    const { selectedNodeIds, sceneGraph } = get();
+    const nodeIds = [...selectedNodeIds].filter((id) => sceneGraph.getNode(id)?.type === 'mesh');
+    if (nodeIds.length === 0) return;
+    get().runCommand('Duplicate', () => {
+      const st = get();
+      const newMeshes = { ...st.meshes };
+      const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
+      const newSel = new Set<string>();
+      let lastMeshId = st.activeMeshId;
+      nodeIds.forEach((id) => {
+        const node = sg.getNode(id);
+        if (!node?.meshId) return;
+        const src = st.meshes[node.meshId];
+        if (!src) return;
+        const copy = cloneMeshDocument(src);
+        copy.name = nextObjectName(sg, newMeshes, src.name);
+        const { nodeId, meshId } = addMeshToScene(sg, newMeshes, copy, {
+          position: {
+            x: node.transform.position.x + st.snapSize,
+            y: node.transform.position.y,
+            z: node.transform.position.z + st.snapSize,
+          },
+          rotation: { ...node.transform.rotation },
+          scale: { ...node.transform.scale },
+        });
+        newSel.add(nodeId);
+        lastMeshId = meshId;
+      });
+      const mesh = newMeshes[lastMeshId];
+      set({
+        meshes: newMeshes,
+        sceneGraph: sg,
+        activeMeshId: lastMeshId,
+        selectedNodeIds: newSel,
+        ...(mesh ? syncLayerStateFromMesh(mesh) : {}),
+        selVerts: new Set(),
+        selEdges: new Set(),
+        selFaces: new Set(),
+      });
+    });
+  },
+
+  renameSceneNode: (nodeId, name) => {
+    const node = get().sceneGraph.getNode(nodeId);
+    if (!node) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    node.name = trimmed;
+    if (node.meshId && get().meshes[node.meshId]) {
+      get().meshes[node.meshId].name = trimmed;
+    }
+    get().notifyChange();
+  },
+
+  toggleSceneNodeVisible: (nodeId) => {
+    const node = get().sceneGraph.getNode(nodeId);
+    if (!node) return;
+    node.visible = !node.visible;
+    get().notifyChange();
+  },
+
+  toggleSceneNodeLocked: (nodeId) => {
+    const node = get().sceneGraph.getNode(nodeId);
+    if (!node) return;
+    node.locked = !node.locked;
+    get().notifyChange();
   },
 
   notifyChange: (opts) => {
@@ -340,8 +607,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   runCommand: (name, mutate) => {
     const before = get().getSnapshot();
+    const meshCountBefore = Object.keys(before.meshes).length;
     mutate();
     const after = get().getSnapshot();
+    if (Object.keys(after.meshes).length === meshCountBefore && name.startsWith('Add ')) {
+      return;
+    }
     const cmd = new SnapshotCommand(name, before, after, (snap) => {
       get().applySnapshot(snap);
       get().notifyChange();
@@ -409,22 +680,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ? 'Discard unsaved changes and start a new scene?'
       : 'Start a new empty scene?';
     if (!confirm(msg)) return;
-    const mesh = createMeshDocument();
-    ensureLayerData(mesh);
-    const sceneGraph = new SceneGraph();
-    sceneGraph.ensureMeshNode(mesh.id, mesh.name);
     set({
       ...createInitialState(),
-      mesh,
-      sceneGraph,
       history: new CommandHistory(50),
       wipFace: [],
       primDraw: null,
       groupSel: 0,
       matSel: 0,
       selectionMode: 'object',
-      layers: mesh.layers,
-      activeLayer: 0,
       vp2d: defaultVp2d(),
       projectFileName: null,
       projectDirty: false,
@@ -434,19 +697,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().centerAllViews();
   },
 
-  applyProject: (project: ProjectFileV1, fileName: string | null) => {
+  applyProject: (project: ProjectFileV2, fileName: string | null) => {
     const sceneGraph = SceneGraph.fromJSON(project.sceneGraph);
-    ensureLayerData(project.mesh);
-    sceneGraph.ensureMeshNode(project.mesh.id, project.mesh.name);
+    const meshes = meshesFromArray(project.meshes);
+    Object.values(meshes).forEach((m) => ensureLayerData(m));
+    const activeMesh = meshes[project.activeMeshId] ?? Object.values(meshes)[0];
     set({
-      mesh: project.mesh,
+      meshes,
+      activeMeshId: activeMesh.id,
+      selectedNodeIds: new Set(),
       sceneGraph,
       history: new CommandHistory(50),
-      layers: project.mesh.layers,
-      activeLayer: Math.max(
-        0,
-        project.mesh.layers.findIndex((l) => l.id === project.mesh.activeLayerId),
-      ),
+      ...syncLayerStateFromMesh(activeMesh),
       vp2d: project.editor.vp2d,
       wireframe: project.editor.wireframe,
       flatShading: project.editor.flatShading,
@@ -480,13 +742,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const mesh = result.mesh;
       ensureLayerData(mesh);
       const sceneGraph = new SceneGraph();
-      sceneGraph.ensureMeshNode(mesh.id, mesh.name);
+      const meshes: MeshesRecord = { [mesh.id]: mesh };
+      addMeshToScene(sceneGraph, meshes, mesh);
       set({
-        mesh,
+        meshes,
+        activeMeshId: mesh.id,
+        selectedNodeIds: new Set(),
         sceneGraph,
         history: new CommandHistory(50),
-        layers: mesh.layers,
-        activeLayer: 0,
+        ...syncLayerStateFromMesh(mesh),
         selVerts: new Set(),
         selEdges: new Set(),
         selFaces: new Set(),
@@ -507,21 +771,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return;
       }
       get().runCommand(`Import ${file.name}`, () => {
-        const { mesh, groupSel } = get();
-        const beforeV = mesh.vertices.length;
-        const beforeF = mesh.faces.length;
-        result.mesh.vertices.forEach((v, i) => {
-          mesh.vertices.push({ ...v });
-          mesh.vertexLayers.push(result.mesh.vertexLayers[i] ?? mesh.activeLayerId);
+        const st = get();
+        const imported = cloneMeshDocument(result.mesh);
+        ensureLayerData(imported);
+        imported.name = nextObjectName(st.sceneGraph, st.meshes, imported.name);
+        const meshes = { ...st.meshes };
+        const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
+        const { nodeId, meshId } = addMeshToScene(sg, meshes, imported);
+        set({
+          meshes,
+          sceneGraph: sg,
+          activeMeshId: meshId,
+          selectedNodeIds: new Set([nodeId]),
+          ...syncLayerStateFromMesh(imported),
+          selVerts: new Set(),
+          selEdges: new Set(),
+          selFaces: new Set(),
         });
-        result.mesh.faces.forEach((f, i) => {
-          if (!f) return;
-          const fi = mesh.faces.length;
-          mesh.faces.push(f.map((vi) => vi + beforeV));
-          mesh.faceLayers.push(result.mesh.faceLayers[i] ?? mesh.activeLayerId);
-          mesh.groups[groupSel]?.faces.push(fi);
-        });
-        assignNewGeometryToActiveLayer(mesh, beforeV, beforeF);
       });
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Import failed');
@@ -531,7 +797,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   saveProject: async () => {
     const state = get();
     const json = serializeProject({
-      mesh: state.mesh,
+      meshes: meshesToArray(state.meshes),
+      activeMeshId: state.activeMeshId,
       sceneGraph: state.sceneGraph.toJSON(),
       editor: {
         vp2d: state.vp2d,
@@ -545,7 +812,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         matSel: state.matSel,
       },
     });
-    const name = state.projectFileName ?? defaultProjectName(state.mesh.name);
+    const name = state.projectFileName ?? defaultProjectName(state.getActiveMesh().name);
     const usedPicker = await saveTextWithPicker(
       json,
       name,
@@ -566,19 +833,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   centerAllViews: () => {
-    const { mesh } = get();
+    const state = get();
+    const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
+    const mesh = state.getActiveMesh();
     set((s) => ({
       maximizedVP: null,
       viewportLayout: 'quad',
-      vp2d: frame2DViewports(mesh),
+      vp2d: bounds ? frame2DViewportsFromBounds(bounds) : frame2DViewports(mesh),
       renderTick: s.renderTick + 1,
     }));
-    editorEvents.emit('viewport:frame3d', meshBounds(mesh));
+    editorEvents.emit('viewport:frame3d', bounds);
     editorEvents.emit('viewport:render', undefined);
   },
 
   selectAll: () => {
-    const { mesh, selectionMode } = get();
+    const { selectionMode, sceneGraph } = get();
+    if (selectionMode === 'object') {
+      const ids = new Set(getMeshNodes(sceneGraph).map((n) => n.id));
+      set({ selectedNodeIds: ids });
+      get().notifyChange();
+      return;
+    }
+    const mesh = get().getActiveMesh();
     const visibleVerts = visibleVertexIndices(mesh);
     const visibleFaces = visibleFaceIndices(mesh);
     set({
@@ -598,12 +874,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   deselectAll: () => {
-    set({ selVerts: new Set(), selEdges: new Set(), selFaces: new Set(), wipFace: [] });
+    set({ selVerts: new Set(), selEdges: new Set(), selFaces: new Set(), selectedNodeIds: new Set(), wipFace: [] });
     get().notifyChange();
   },
 
   invertSelection: () => {
-    const { mesh, selVerts, selEdges, selFaces, selectionMode } = get();
+    const { selVerts, selEdges, selFaces, selectionMode, sceneGraph } = get();
+    if (selectionMode === 'object') {
+      const all = new Set(getMeshNodes(sceneGraph).map((n) => n.id));
+      const next = new Set([...all].filter((id) => !get().selectedNodeIds.has(id)));
+      set({ selectedNodeIds: next });
+      get().notifyChange();
+      return;
+    }
+    const mesh = get().getActiveMesh();
     const visibleVerts = visibleVertexIndices(mesh);
     const visibleFaces = visibleFaceIndices(mesh);
     const allEdges = uniqueMeshEdges(mesh).filter((edge) => {
@@ -612,12 +896,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     set({
       selVerts:
-        selectionMode === 'vertex' || selectionMode === 'object'
+        selectionMode === 'vertex'
           ? new Set([...visibleVerts].filter((i) => !selVerts.has(i)))
           : new Set(),
       selEdges: selectionMode === 'edge' ? new Set(allEdges.filter((edge) => !selEdges.has(edge))) : new Set(),
       selFaces:
-        selectionMode === 'face' || selectionMode === 'object'
+        selectionMode === 'face'
           ? new Set([...visibleFaces].filter((i) => !selFaces.has(i)))
           : new Set(),
     });
@@ -627,18 +911,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   deleteSelected: () => {
     const state = get();
     const mode = effectiveSelectionMode(state.tool, state.selectionMode);
-    const targets = getDeleteTargets(state.mesh, mode, state.selVerts, state.selEdges, state.selFaces);
+    if (mode === 'object' && state.selectedNodeIds.size > 0) {
+      state.deleteSelectedObjects();
+      return;
+    }
+    const mesh = state.getActiveMesh();
+    const targets = getDeleteTargets(mesh, mode, state.selVerts, state.selEdges, state.selFaces);
     if (!hasDeletableSelection(targets)) return;
 
     get().runCommand('Delete', () => {
-      meshOps.deleteSelection(get().mesh, targets.verts, targets.faces);
+      meshOps.deleteSelection(get().getActiveMesh(), targets.verts, targets.faces);
       set({ selVerts: new Set(), selEdges: new Set(), selFaces: new Set(), wipFace: [] });
       editorEvents.emit('selection:changed', undefined);
     });
   },
 
   startPrimDraw: (type) => {
-    set({ primDraw: createPrimDrawState(type) });
+    set({
+      primDraw: createPrimDrawState(type),
+      tool: 'select',
+      selectionMode: 'object',
+    });
     get().notifyChange();
   },
 
@@ -653,34 +946,52 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   commitPrimDraw: () => {
-    const { primDraw, mesh, groupSel, snapSize } = get();
-    if (!primDraw) return;
-    const bounds = enforceMinSize(primDraw.bounds, snapSize);
+    const { primDraw, snapSize } = get();
+    if (!primDraw || !canCommitPrimDraw(primDraw, snapSize)) return;
+
     const type = primDraw.type;
-    get().runCommand(`Add ${type}`, () => {
-      const beforeVertexCount = mesh.vertices.length;
-      const beforeFaceCount = mesh.faces.length;
-      addPrimitiveForDraw(mesh, type, bounds, primDraw.baseView, groupSel);
-      assignNewGeometryToActiveLayer(mesh, beforeVertexCount, beforeFaceCount);
+    const baseView = primDraw.baseView;
+    const bounds = enforceMinSize(primDraw.bounds, snapSize);
+    const label = type.charAt(0).toUpperCase() + type.slice(1);
+
+    get().runCommand(`Add ${label}`, () => {
+      const st = get();
+      const name = nextObjectName(st.sceneGraph, st.meshes, 'Layer Scene');
+      const { mesh, worldCenter } = createPrimitiveMeshDocument(type, bounds, baseView, name);
+      if (mesh.vertices.length === 0 || mesh.faces.length === 0) return;
+
+      const newMeshes = { ...st.meshes };
+      const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
+      const { nodeId, meshId } = addMeshToScene(sg, newMeshes, mesh, { position: worldCenter }, name);
+      set({
+        primDraw: null,
+        meshes: newMeshes,
+        sceneGraph: sg,
+        activeMeshId: meshId,
+        selectedNodeIds: new Set([nodeId]),
+        ...syncLayerStateFromMesh(mesh),
+        selVerts: new Set(),
+        selEdges: new Set(),
+        selFaces: new Set(),
+      });
     });
-    set({ primDraw: null });
+    get().notifyChange();
   },
 
-  weldVerts: (thresh = 4) => get().runCommand('Weld', () => meshOps.weldVertices(get().mesh, thresh)),
+  weldVerts: (thresh = 4) => get().runCommand('Weld', () => meshOps.weldVertices(get().getActiveMesh(), thresh)),
   weldAll: () => get().weldVerts(5),
   snapToGrid: () =>
     get().runCommand('Snap', () => {
-      const { mesh } = get();
-      meshOps.snapVerticesToGrid(mesh, get().selectedTransformVerts(), get().snap);
+      meshOps.snapVerticesToGrid(get().getActiveMesh(), get().selectedTransformVerts(), get().snap);
     }),
-  averageVerts: () => get().runCommand('Average', () => meshOps.averageVertices(get().mesh, get().selectedTransformVerts())),
-  flipNormals: () => get().runCommand('Flip Normals', () => meshOps.flipNormals(get().mesh, get().selFaces)),
+  averageVerts: () => get().runCommand('Average', () => meshOps.averageVertices(get().getActiveMesh(), get().selectedTransformVerts())),
+  flipNormals: () => get().runCommand('Flip Normals', () => meshOps.flipNormals(get().getActiveMesh(), get().selFaces)),
   fillHole: () => {
     let created: number[] | null = null as number[] | null;
     const doubleSided = get().fillHoleDoubleSided;
     get().runCommand(doubleSided ? 'Fill Hole (double-sided)' : 'Fill Hole', () => {
-      const { mesh, selVerts, selEdges, groupSel } = get();
-      created = meshOps.fillHole(mesh, selVerts, selEdges, groupSel, doubleSided);
+      const st = get();
+      created = meshOps.fillHole(st.getActiveMesh(), st.selVerts, st.selEdges, st.groupSel, doubleSided);
     });
     if (created !== null && created.length > 0) {
       set({
@@ -693,24 +1004,38 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get().notifyChange();
     }
   },
-  subdivide: () => get().runCommand('Subdivide', () => meshOps.subdivide(get().mesh, get().selFaces, get().groupSel)),
+  subdivide: () => get().runCommand('Subdivide', () => meshOps.subdivide(get().getActiveMesh(), get().selFaces, get().groupSel)),
   triangulateFaces: () =>
-    get().runCommand('Triangulate', () => meshOps.triangulate(get().mesh, get().selFaces, get().groupSel)),
+    get().runCommand('Triangulate', () => meshOps.triangulate(get().getActiveMesh(), get().selFaces, get().groupSel)),
   extrudeFaces: () =>
-    get().runCommand('Extrude', () => meshOps.extrudeFaces(get().mesh, get().selFaces, get().groupSel, 12)),
+    get().runCommand('Extrude', () => meshOps.extrudeFaces(get().getActiveMesh(), get().selFaces, get().groupSel, 12)),
   bevelEdges: () =>
     get().runCommand('Bevel', () =>
-      meshOps.bevelEdges(get().mesh, get().selEdges, 2, get().groupSel),
+      meshOps.bevelEdges(get().getActiveMesh(), get().selEdges, 2, get().groupSel),
     ),
   insetFaces: () =>
-    get().runCommand('Inset', () => meshOps.insetFaces(get().mesh, get().selFaces, get().groupSel, 0.12)),
-  smoothMesh: () => get().runCommand('Smooth', () => meshOps.smoothMesh(get().mesh, get().selectedTransformVerts())),
+    get().runCommand('Inset', () => meshOps.insetFaces(get().getActiveMesh(), get().selFaces, get().groupSel, 0.12)),
+  smoothMesh: () => get().runCommand('Smooth', () => meshOps.smoothMesh(get().getActiveMesh(), get().selectedTransformVerts())),
 
   applyMove: (dx, dy, dz) => {
-    const selected = get().selectedTransformVerts();
+    const state = get();
+    if (state.selectionMode === 'object' && state.selectedNodeIds.size > 0) {
+      get().runCommand('Move Object', () => {
+        state.selectedNodeIds.forEach((id) => {
+          const node = get().sceneGraph.getNode(id);
+          if (node?.type === 'mesh') {
+            node.transform.position.x += dx;
+            node.transform.position.y += dy;
+            node.transform.position.z += dz;
+          }
+        });
+      });
+      return;
+    }
+    const selected = state.selectedTransformVerts();
     if (selected.size === 0) return;
     get().runCommand('Move', () => {
-      const { mesh } = get();
+      const mesh = get().getActiveMesh();
       selected.forEach((vi) => {
         mesh.vertices[vi].x += dx;
         mesh.vertices[vi].y += dy;
@@ -720,10 +1045,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   applyRotate: (rx, ry, rz) => {
-    const selected = get().selectedTransformVerts();
+    const state = get();
+    if (state.selectionMode === 'object' && state.selectedNodeIds.size > 0) {
+      get().runCommand('Rotate Object', () => {
+        state.selectedNodeIds.forEach((id) => {
+          const node = get().sceneGraph.getNode(id);
+          if (node?.type === 'mesh') {
+            node.transform.rotation.x += rx;
+            node.transform.rotation.y += ry;
+            node.transform.rotation.z += rz;
+          }
+        });
+      });
+      return;
+    }
+    const selected = state.selectedTransformVerts();
     if (selected.size === 0) return;
     get().runCommand('Rotate', () => {
-      const { mesh } = get();
+      const mesh = get().getActiveMesh();
       const tgt = [...selected];
       const rxr = (rx * Math.PI) / 180,
         ryr = (ry * Math.PI) / 180,
@@ -746,10 +1085,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   applyScale: (sx, sy, sz) => {
-    const selected = get().selectedTransformVerts();
+    const state = get();
+    if (state.selectionMode === 'object' && state.selectedNodeIds.size > 0) {
+      get().runCommand('Scale Object', () => {
+        state.selectedNodeIds.forEach((id) => {
+          const node = get().sceneGraph.getNode(id);
+          if (node?.type === 'mesh') {
+            node.transform.scale.x *= sx;
+            node.transform.scale.y *= sy;
+            node.transform.scale.z *= sz;
+          }
+        });
+      });
+      return;
+    }
+    const selected = state.selectedTransformVerts();
     if (selected.size === 0) return;
     get().runCommand('Scale', () => {
-      const { mesh } = get();
+      const mesh = get().getActiveMesh();
       selected.forEach((vi) => {
         mesh.vertices[vi].x *= sx;
         mesh.vertices[vi].y *= sy;
@@ -779,14 +1132,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   frameAll: () => {
-    const { mesh } = get();
-    set((s) => ({ vp2d: frame2DViewports(mesh), renderTick: s.renderTick + 1 }));
-    editorEvents.emit('viewport:frame3d', meshBounds(mesh));
+    const state = get();
+    const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
+    const mesh = state.getActiveMesh();
+    set((s) => ({
+      vp2d: bounds ? frame2DViewportsFromBounds(bounds) : frame2DViewports(mesh),
+      renderTick: s.renderTick + 1,
+    }));
+    editorEvents.emit('viewport:frame3d', bounds);
     editorEvents.emit('viewport:render', undefined);
   },
 
   addGroup: () => {
-    const { mesh } = get();
+    const mesh = get().getActiveMesh();
     mesh.groups.push({
       name: `Group${mesh.groups.length + 1}`,
       faces: [],
@@ -797,7 +1155,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   renameGroup: () => {
-    const { mesh, groupSel } = get();
+    const mesh = get().getActiveMesh();
+    const { groupSel } = get();
     get().showModal({
       title: 'Rename Group',
       fields: [{ id: 'name', label: 'Name', type: 'text', value: mesh.groups[groupSel].name }],
@@ -809,7 +1168,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   assignGroup: () => {
-    const { mesh, selFaces, groupSel } = get();
+    const mesh = get().getActiveMesh();
+    const { selFaces, groupSel } = get();
     selFaces.forEach((fi) => {
       mesh.groups.forEach((g) => {
         g.faces = g.faces.filter((f) => f !== fi);
@@ -820,7 +1180,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   deleteGroup: () => {
-    const { mesh } = get();
+    const mesh = get().getActiveMesh();
     if (mesh.groups.length <= 1) return;
     mesh.groups.splice(get().groupSel, 1);
     set({ groupSel: 0 });
@@ -830,7 +1190,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setGroupSel: (i) => set({ groupSel: i }),
 
   addMaterial: () => {
-    const { mesh } = get();
+    const mesh = get().getActiveMesh();
     mesh.materials.push({
       name: `Mat${mesh.materials.length + 1}`,
       color: GROUP_COLORS[mesh.materials.length % GROUP_COLORS.length],
@@ -841,7 +1201,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   editMaterial: () => {
-    const { mesh, matSel } = get();
+    const mesh = get().getActiveMesh();
+    const { matSel } = get();
     const m = mesh.materials[matSel];
     get().showModal({
       title: 'Edit Material',
@@ -860,7 +1221,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   assignMaterial: () => get().applyMaterialToSelection(),
 
   setMaterialName: (name) => {
-    const { mesh, matSel } = get();
+    const mesh = get().getActiveMesh();
+    const { matSel } = get();
     const m = mesh.materials[matSel];
     if (!m) return;
     m.name = name.trim() || m.name;
@@ -868,7 +1230,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setMaterialColor: (color) => {
-    const { mesh, matSel } = get();
+    const mesh = get().getActiveMesh();
+    const { matSel } = get();
     const m = mesh.materials[matSel];
     if (!m) return;
     get().runCommand('Material Color', () => {
@@ -877,7 +1240,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   pickPaletteColor: (color) => {
-    const { mesh, matSel, selFaces, groupSel } = get();
+    const mesh = get().getActiveMesh();
+    const { matSel, selFaces, groupSel } = get();
     const m = mesh.materials[matSel];
     if (!m) return;
     get().runCommand(selFaces.size > 0 ? 'Paint Faces' : 'Material Color', () => {
@@ -889,7 +1253,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   applyMaterialToSelection: (materialIndex) => {
-    const { mesh, selFaces, groupSel } = get();
+    const mesh = get().getActiveMesh();
+    const { selFaces, groupSel } = get();
     if (selFaces.size === 0) return;
     const idx = materialIndex ?? get().matSel;
     const m = mesh.materials[idx];
@@ -903,14 +1268,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setMatSel: (i) => set({ matSel: i }),
 
   addBone: () => {
-    const { mesh } = get();
+    const mesh = get().getActiveMesh();
     mesh.bones.push({ name: `Bone${mesh.bones.length + 1}`, pos: { x: 0, y: 0, z: 0 } });
     get().sceneGraph.addBoneNode(mesh.bones[mesh.bones.length - 1].name);
     get().notifyChange();
   },
 
   deleteBone: () => {
-    const { mesh } = get();
+    const mesh = get().getActiveMesh();
     if (mesh.bones.length) {
       mesh.bones.pop();
       get().notifyChange();
@@ -918,12 +1283,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   addLayer: () => {
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     ensureLayerData(mesh);
     const layers = [...mesh.layers, createLayer(`Layer ${mesh.layers.length + 1}`, mesh.layers.length)];
     mesh.layers = layers;
     mesh.activeLayerId = layers[layers.length - 1].id;
-    set({ mesh, layers, activeLayer: layers.length - 1 });
+    commitActiveMesh(mesh);
     get().notifyChange();
   },
 
@@ -942,27 +1307,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   renameLayerInline: (index, name) => {
     const layer = get().layers[index];
     if (!layer) return;
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     const layers = [...mesh.layers];
     layers[index] = { ...layer, name: name.trim() || layer.name };
     mesh.layers = layers;
-    set({ mesh, layers });
+    commitActiveMesh(mesh);
     get().notifyChange();
   },
 
   setLayerColor: (index, color) => {
     const layer = get().layers[index];
     if (!layer) return;
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     const layers = [...mesh.layers];
     layers[index] = { ...layer, color };
     mesh.layers = layers;
-    set({ mesh, layers });
+    commitActiveMesh(mesh);
     get().notifyChange();
   },
 
   deleteLayer: (index = get().activeLayer) => {
-    const { mesh, layers } = get();
+    const mesh = get().getActiveMesh();
+    const { layers } = get();
     if (layers.length <= 1) return;
     if (index < 0 || index >= layers.length) return;
     const removed = layers[index];
@@ -972,43 +1338,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     mesh.faceLayers = mesh.faceLayers.map((layerId) => (layerId === removed.id ? fallback.id : layerId));
     mesh.layers = next;
     mesh.activeLayerId = fallback.id;
-    set({ mesh, layers: next, activeLayer: Math.max(0, next.findIndex((layer) => layer.id === fallback.id)) });
+    commitActiveMesh(mesh);
+    set({ activeLayer: Math.max(0, next.findIndex((layer) => layer.id === fallback.id)) });
     get().notifyChange();
   },
 
   setActiveLayer: (index) => {
     if (index < 0 || index >= get().layers.length) return;
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     mesh.activeLayerId = get().layers[index].id;
-    set({ mesh, activeLayer: index });
+    commitActiveMesh(mesh);
+    set({ activeLayer: index });
     get().notifyChange();
   },
 
   toggleLayerVisible: (index) => {
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     const layers = [...mesh.layers];
     const layer = layers[index];
     if (!layer) return;
     layers[index] = { ...layer, visible: !layer.visible };
     mesh.layers = layers;
-    set({ mesh, layers });
+    commitActiveMesh(mesh);
     if (!layers[index].visible) get().deselectAll();
     get().notifyChange();
   },
 
   toggleLayerLocked: (index) => {
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     const layers = [...mesh.layers];
     const layer = layers[index];
     if (!layer) return;
     layers[index] = { ...layer, locked: !layer.locked };
     mesh.layers = layers;
-    set({ mesh, layers });
+    commitActiveMesh(mesh);
     get().notifyChange();
   },
 
   assignSelectionToLayer: () => {
-    const { mesh, selVerts, selEdges, selFaces } = get();
+    const mesh = get().getActiveMesh();
+    const { selVerts, selEdges, selFaces } = get();
     ensureLayerData(mesh);
     const targetLayerId = mesh.activeLayerId;
     const selectedVerts = new Set([...selVerts, ...[...selEdges].flatMap((edge) => parseEdgeKey(edge))]);
@@ -1023,19 +1392,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         });
       }
     });
-    set({ mesh, layers: mesh.layers });
+    commitActiveMesh(mesh);
     get().notifyChange();
   },
 
   reorderLayer: (from, to) => {
-    const mesh = get().mesh;
+    const mesh = get().getActiveMesh();
     const layers = [...mesh.layers];
     if (from === to || from < 0 || to < 0 || from >= layers.length || to >= layers.length) return;
     const [moved] = layers.splice(from, 1);
     layers.splice(to, 0, moved);
     mesh.layers = layers;
     mesh.activeLayerId = moved.id;
-    set({ mesh, layers, activeLayer: to });
+    commitActiveMesh(mesh);
+    set({ activeLayer: to });
     get().notifyChange();
   },
 
@@ -1049,20 +1419,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (i < get().layers.length - 1) get().reorderLayer(i, i + 1);
   },
 
-  exportOBJ: () => exportOBJ(get().mesh),
-  exportSTL: () => exportSTL(get().mesh),
-  exportPLY: () => exportPLY(get().mesh),
-  exportGLTF: () => exportGLTF(get().mesh),
+  exportOBJ: () => exportOBJ(get().getActiveMesh()),
+  exportSTL: () => exportSTL(get().getActiveMesh()),
+  exportPLY: () => exportPLY(get().getActiveMesh()),
+  exportGLTF: () => exportGLTF(get().getActiveMesh()),
 
   showModal: (modal) => set({ modal: { ...modal, open: true } }),
   closeModal: () => set({ modal: null }),
 
   applyClickSelection: (vpKey, sx, sy, shiftKey, ctrlKey = false) => {
     const state = get();
-    const visibleVerts = visibleVertexIndices(state.mesh);
-    const visibleFaces = visibleFaceIndices(state.mesh);
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
     const result = applyClickSelection2D({
-      mesh: state.mesh,
+      mesh,
       vpKey,
       vpState: state.vp2d[vpKey],
       sx,
@@ -1087,10 +1458,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyBoxSelection: (vpKey, rect, shiftKey, ctrlKey = false) => {
     const state = get();
-    const visibleVerts = visibleVertexIndices(state.mesh);
-    const visibleFaces = visibleFaceIndices(state.mesh);
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
     const result = boxSelect2D({
-      mesh: state.mesh,
+      mesh,
       vpKey,
       vpState: state.vp2d[vpKey],
       rect,
@@ -1114,10 +1486,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyClickSelection3D: (camera, canvas, sx, sy, shiftKey, ctrlKey = false) => {
     const state = get();
-    const visibleVerts = visibleVertexIndices(state.mesh);
-    const visibleFaces = visibleFaceIndices(state.mesh);
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
     const result = applyClickSelection3D({
-      mesh: state.mesh,
+      mesh,
       camera,
       canvas,
       sx,
@@ -1142,10 +1515,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyBoxSelection3D: (camera, canvas, rect, shiftKey, ctrlKey = false) => {
     const state = get();
-    const visibleVerts = visibleVertexIndices(state.mesh);
-    const visibleFaces = visibleFaceIndices(state.mesh);
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
     const result = boxSelect3D({
-      mesh: state.mesh,
+      mesh,
       camera,
       canvas,
       rect,
@@ -1183,7 +1557,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().notifyChange();
   },
   selectedTransformVerts: () => {
-    const { mesh, selectionMode, selVerts, selEdges, selFaces } = get();
+    const { selectionMode, selVerts, selEdges, selFaces } = get();
+    const mesh = get().getActiveMesh();
+    if (selectionMode === 'object') return new Set<number>();
     if (selectionMode === 'edge') {
       return editableVertexIndices(mesh, new Set([...selEdges].flatMap((edge) => parseEdgeKey(edge))));
     }
@@ -1192,16 +1568,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         mesh,
         new Set([...editableFaceIndices(mesh, selFaces)].flatMap((fi) => mesh.faces[fi] ?? [])),
       );
-    }
-    if (selectionMode === 'object') {
-      if (selVerts.size > 0) return editableVertexIndices(mesh, selVerts);
-      if (selFaces.size > 0) {
-        return editableVertexIndices(
-          mesh,
-          new Set([...editableFaceIndices(mesh, selFaces)].flatMap((fi) => mesh.faces[fi] ?? [])),
-        );
-      }
-      return visibleVertexIndices(mesh);
     }
     return editableVertexIndices(mesh, selVerts);
   },

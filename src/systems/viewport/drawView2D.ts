@@ -1,16 +1,76 @@
 import { VIEW2D_DEFS, w2s, type View2DKey } from '@/core/math/projection';
 import { faceGroupIndex, type MeshDocument } from '@/core/mesh/MeshDocument';
 import type { PrimDrawState } from '@/systems/mesh/primDraw';
-import { drawCadPrimPreview2D } from '@/systems/viewport/drawBoundsPreview';
+import { drawBoundsWireframe2D, drawCadPrimPreview2D } from '@/systems/viewport/drawBoundsPreview';
 import { parseEdgeKey, type EdgeKey } from '@/systems/selection/selectionSystem';
 import { MS3D_VIEW } from '@/systems/viewport/viewportColors';
 import { ORTHO_MAJOR_EVERY, orthoGridScreenStep } from '@/systems/viewport/snapGrid';
+import {
+  meshWorldBounds,
+  transformPoint,
+  type SceneRenderEntry,
+} from '@/systems/scene/sceneObjectHelpers';
+import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layerSystem';
 
 export interface SelRect {
   x: number;
   y: number;
   w: number;
   h: number;
+}
+
+export interface DrawView2DOptions {
+  skipBackground?: boolean;
+  skipPrim?: boolean;
+  skipMarquee?: boolean;
+}
+
+function drawOrthoBackground(
+  ctx: CanvasRenderingContext2D,
+  W: number,
+  H: number,
+  state: { pan: { x: number; y: number }; zoom: number },
+  grid: { snapSize: number; showGrid: boolean },
+): void {
+  ctx.fillStyle = MS3D_VIEW.orthoBg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (!grid.showGrid) return;
+
+  const gs = orthoGridScreenStep(grid.snapSize, state.zoom);
+  const ox = ((state.pan.x % gs) + gs) % gs;
+  const oy = ((state.pan.y % gs) + gs) % gs;
+  ctx.strokeStyle = MS3D_VIEW.orthoGrid;
+  ctx.lineWidth = 0.5;
+  for (let x = ox; x < W; x += gs) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = oy; y < H; y += gs) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+  const bgs = gs * ORTHO_MAJOR_EVERY;
+  const box = ((state.pan.x % bgs) + bgs) % bgs;
+  const boy = ((state.pan.y % bgs) + bgs) % bgs;
+  ctx.strokeStyle = MS3D_VIEW.orthoGridMajor;
+  ctx.lineWidth = 1;
+  for (let x = box; x < W; x += bgs) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = boy; y < H; y += bgs) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
 }
 
 export function drawView2D(
@@ -29,47 +89,13 @@ export function drawView2D(
   selRect: SelRect | null,
   primDraw: PrimDrawState | null = null,
   grid: { snapSize: number; showGrid: boolean } = { snapSize: 5, showGrid: true },
+  primActiveHandleId: string | null = null,
+  options: DrawView2DOptions = {},
 ) {
   const vd = VIEW2D_DEFS[vpKey];
 
-  ctx.fillStyle = MS3D_VIEW.orthoBg;
-  ctx.fillRect(0, 0, W, H);
-
-  if (grid.showGrid) {
-    const gs = orthoGridScreenStep(grid.snapSize, state.zoom);
-    const ox = ((state.pan.x % gs) + gs) % gs;
-    const oy = ((state.pan.y % gs) + gs) % gs;
-    ctx.strokeStyle = MS3D_VIEW.orthoGrid;
-    ctx.lineWidth = 0.5;
-    for (let x = ox; x < W; x += gs) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, H);
-      ctx.stroke();
-    }
-    for (let y = oy; y < H; y += gs) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(W, y);
-      ctx.stroke();
-    }
-    const bgs = gs * ORTHO_MAJOR_EVERY;
-    const box = ((state.pan.x % bgs) + bgs) % bgs;
-    const boy = ((state.pan.y % bgs) + bgs) % bgs;
-    ctx.strokeStyle = MS3D_VIEW.orthoGridMajor;
-    ctx.lineWidth = 1;
-    for (let x = box; x < W; x += bgs) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, H);
-      ctx.stroke();
-    }
-    for (let y = boy; y < H; y += bgs) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(W, y);
-      ctx.stroke();
-    }
+  if (!options.skipBackground) {
+    drawOrthoBackground(ctx, W, H, state, grid);
   }
 
   mesh.faces.forEach((f, fi) => {
@@ -117,7 +143,7 @@ export function drawView2D(
         ctx.beginPath();
         ctx.moveTo(sc0.x, sc0.y);
         ctx.lineTo(sc.x, sc.y);
-        ctx.strokeStyle = 'rgba(216,162,76,0.65)';
+        ctx.strokeStyle = 'rgba(232, 90, 26, 0.65)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
@@ -151,13 +177,146 @@ export function drawView2D(
     const half = size / 2;
     ctx.fillStyle = isSel ? MS3D_VIEW.vertexSelected : MS3D_VIEW.vertex;
     ctx.fillRect(sc.x - half, sc.y - half, size, size);
-    ctx.strokeStyle = isSel ? '#fff1bd' : '#0d141d';
+    ctx.strokeStyle = isSel ? '#fff1e8' : '#0a1018';
     ctx.lineWidth = 1;
     ctx.strokeRect(sc.x - half, sc.y - half, size, size);
   });
 
+  if (!options.skipPrim && primDraw) {
+    drawCadPrimPreview2D(ctx, vpKey, primDraw, state.pan, state.zoom, primActiveHandleId);
+  }
+
+  if (!options.skipMarquee && selRect) {
+    ctx.strokeStyle = MS3D_VIEW.selection;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(selRect.x, selRect.y, selRect.w, selRect.h);
+    ctx.fillStyle = 'rgba(110, 196, 208, 0.1)';
+    ctx.fillRect(selRect.x, selRect.y, selRect.w, selRect.h);
+    ctx.setLineDash([]);
+  }
+}
+
+function meshInWorldSpace(mesh: MeshDocument, entry: SceneRenderEntry): MeshDocument {
+  const t = entry.transform;
+  const isIdentity =
+    t.position.x === 0 &&
+    t.position.y === 0 &&
+    t.position.z === 0 &&
+    t.rotation.x === 0 &&
+    t.rotation.y === 0 &&
+    t.rotation.z === 0 &&
+    t.scale.x === 1 &&
+    t.scale.y === 1 &&
+    t.scale.z === 1;
+  if (isIdentity) return mesh;
+  return {
+    ...mesh,
+    vertices: mesh.vertices.map((v) => transformPoint(v, t)),
+  };
+}
+
+function drawObjectBounds2D(
+  ctx: CanvasRenderingContext2D,
+  vpKey: View2DKey,
+  entry: SceneRenderEntry,
+  state: { pan: { x: number; y: number }; zoom: number },
+  selected: boolean,
+): void {
+  const bounds = meshWorldBounds(entry.mesh, entry.transform);
+  if (!bounds) return;
+  drawBoundsWireframe2D(ctx, vpKey, bounds, state.pan, state.zoom, {
+    stroke: selected ? MS3D_VIEW.faceSelected : MS3D_VIEW.selection,
+    lineWidth: selected ? 2 : 1,
+    dash: selected ? undefined : [4, 3],
+  });
+}
+
+/** Draw all scene objects in an orthographic viewport. */
+export function drawSceneView2D(
+  ctx: CanvasRenderingContext2D,
+  W: number,
+  H: number,
+  vpKey: View2DKey,
+  entries: SceneRenderEntry[],
+  activeMeshId: string,
+  selectionMode: 'object' | 'vertex' | 'edge' | 'face',
+  vpState: { pan: { x: number; y: number }; zoom: number },
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+  wipFace: number[],
+  selRect: SelRect | null,
+  primDraw: PrimDrawState | null = null,
+  grid: { snapSize: number; showGrid: boolean } = { snapSize: 5, showGrid: true },
+  primActiveHandleId: string | null = null,
+): void {
+  drawOrthoBackground(ctx, W, H, vpState, grid);
+
+  const visibleEntries = entries.filter((e) => e.visible);
+  const inactive = visibleEntries.filter((e) => e.mesh.id !== activeMeshId);
+  const active = visibleEntries.find((e) => e.mesh.id === activeMeshId);
+  const meshOpts: DrawView2DOptions = {
+    skipBackground: true,
+    skipPrim: true,
+    skipMarquee: true,
+  };
+
+  inactive.forEach((entry) => {
+    const worldMesh = meshInWorldSpace(entry.mesh, entry);
+    drawView2D(
+      ctx,
+      W,
+      H,
+      vpKey,
+      worldMesh,
+      vpState,
+      new Set(),
+      new Set(),
+      new Set(),
+      visibleVertexIndices(entry.mesh),
+      visibleFaceIndices(entry.mesh),
+      [],
+      null,
+      null,
+      grid,
+      null,
+      meshOpts,
+    );
+    if (selectionMode === 'object' && entry.selected) {
+      drawObjectBounds2D(ctx, vpKey, entry, vpState, true);
+    }
+  });
+
+  if (active) {
+    const worldMesh = meshInWorldSpace(active.mesh, active);
+    const showMeshSelection = selectionMode !== 'object';
+    drawView2D(
+      ctx,
+      W,
+      H,
+      vpKey,
+      worldMesh,
+      vpState,
+      showMeshSelection ? selVerts : new Set(),
+      showMeshSelection ? selEdges : new Set(),
+      showMeshSelection ? selFaces : new Set(),
+      visibleVertexIndices(active.mesh),
+      visibleFaceIndices(active.mesh),
+      showMeshSelection ? wipFace : [],
+      null,
+      null,
+      grid,
+      null,
+      meshOpts,
+    );
+    if (selectionMode === 'object' && active.selected) {
+      drawObjectBounds2D(ctx, vpKey, active, vpState, true);
+    }
+  }
+
   if (primDraw) {
-    drawCadPrimPreview2D(ctx, vpKey, primDraw, state.pan, state.zoom);
+    drawCadPrimPreview2D(ctx, vpKey, primDraw, vpState.pan, vpState.zoom, primActiveHandleId);
   }
 
   if (selRect) {
@@ -165,7 +324,7 @@ export function drawView2D(
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     ctx.strokeRect(selRect.x, selRect.y, selRect.w, selRect.h);
-    ctx.fillStyle = 'rgba(79,143,216,0.10)';
+    ctx.fillStyle = 'rgba(110, 196, 208, 0.1)';
     ctx.fillRect(selRect.x, selRect.y, selRect.w, selRect.h);
     ctx.setLineDash([]);
   }

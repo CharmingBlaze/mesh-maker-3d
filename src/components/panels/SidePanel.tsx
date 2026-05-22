@@ -3,6 +3,7 @@ import { useEditorStore, type FaceDrawMode, type ToolId } from '@/store/editorSt
 import { meshStats } from '@/core/mesh/MeshDocument';
 import { PRIMITIVE_CATALOG } from '@/systems/mesh/primitives';
 import { LayersPanel } from '@/components/panels/LayersPanel';
+import { GeometryLayersPanel } from '@/components/panels/GeometryLayersPanel';
 import { SnapGridSection } from './SnapGridSection';
 import { MaterialsTab } from './MaterialsTab';
 import { useMeshDocument } from '@/hooks/useSceneRevision';
@@ -53,8 +54,8 @@ function SidePanel() {
         ))}
       </div>
       <div className="ms-tab-body">
-        {tab === 'model' && <ModelTab />}
         {tab === 'layers' && <LayersPanel />}
+        {tab === 'model' && <ModelTab />}
         {tab === 'groups' && <GroupsTab />}
         {tab === 'materials' && <MaterialsTab />}
         {tab === 'joints' && <JointsTab />}
@@ -148,6 +149,11 @@ function ModelTab() {
             </button>
           ))}
         </div>
+        {primDraw && (
+          <div className="ms-help-line">
+            Click viewport to place · drag for custom size
+          </div>
+        )}
       </fieldset>
 
       <fieldset className="ms-fieldset">
@@ -259,6 +265,8 @@ function ModelTab() {
       </fieldset>
 
       <SnapGridSection />
+
+      <GeometryLayersPanel />
 
       <div className="ms-stats-line">
         Verts: {stats.verts} · Faces: {stats.faces} · Tris: {stats.tris}

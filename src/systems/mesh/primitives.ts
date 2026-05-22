@@ -55,3 +55,26 @@ const DEFAULT_BOUNDS: Record<PrimitiveType, BoundingBox> = {
 export function addPrimitive(doc: MeshDocument, type: PrimitiveType, groupIndex: number): void {
   addPrimitiveInBounds(doc, type, DEFAULT_BOUNDS[type], groupIndex);
 }
+
+export interface PlacementSize {
+  footprint: number;
+  height: number;
+}
+
+/** Default snap-based size when clicking to place a primitive. */
+export function defaultPlacementSize(type: PrimitiveType, snapSize: number): PlacementSize {
+  const footprint = snapSize * 2;
+  switch (type) {
+    case 'plane':
+    case 'disc':
+      return { footprint, height: Math.max(snapSize * 0.25, 1) };
+    case 'stairs':
+      return { footprint, height: snapSize * 2 };
+    case 'cone':
+    case 'pyramid':
+    case 'hemisphere':
+      return { footprint, height: snapSize * 1.5 };
+    default:
+      return { footprint, height: snapSize };
+  }
+}

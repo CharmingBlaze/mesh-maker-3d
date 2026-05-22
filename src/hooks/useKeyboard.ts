@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useEditorStore, type ToolId } from '@/store/editorStore';
+import { canCommitPrimDraw } from '@/hooks/primDrawHelpers';
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -31,6 +32,11 @@ export function useKeyboard() {
       if ((e.ctrlKey && e.key === 'y') || (e.ctrlKey && e.shiftKey && e.key === 'z')) {
         e.preventDefault();
         store.redo();
+        return;
+      }
+      if (e.ctrlKey && e.key === 'd') {
+        e.preventDefault();
+        store.duplicateSelectedObjects();
         return;
       }
       if (e.ctrlKey && e.key === 'o') {
@@ -113,6 +119,13 @@ export function useKeyboard() {
           } else {
             store.setWipFace([]);
             store.deselectAll();
+          }
+          break;
+        case 'Enter':
+        case 'NumpadEnter':
+          if (store.primDraw && canCommitPrimDraw(store.primDraw, store.snapSize)) {
+            e.preventDefault();
+            store.commitPrimDraw();
           }
           break;
         case 'e':

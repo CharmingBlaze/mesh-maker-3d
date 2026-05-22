@@ -5,10 +5,12 @@ import type { Vec3 } from '@/core/math/Vec3';
 import { SnapshotCommand } from '@/core/commands/Command';
 import {
   applyTransformDrag3D,
+  beginObjectTransformDrag,
   beginTransformDragFromSelection,
   beginTransformPending,
   createTransformDragState,
   init3dMovePlane,
+  init3dObjectMovePlane,
   isTransformTool,
   tryStartTransformDrag,
 } from '@/hooks/transformDrag';
@@ -21,10 +23,21 @@ import {
   tryStartModelingDrag,
 } from '@/hooks/modelingDrag';
 import {
-  hasMinBaseSize,
-  hasMinExtentSize,
+  adjustPrimDrawExtentByWheel,
+  isClickNotDrag,
+  resolvePrimDragRelease,
   updatePrimDrag3D,
+  constrainPrimDrawBounds,
 } from '@/hooks/primDrawHelpers';
+import {
+  applyHandleDrag,
+  buildPrimDrawHandles,
+  boundsHasVisibleSize,
+  handleCursor,
+  hitTestPrimDrawHandleScreen,
+  type PrimDrawHandle,
+} from '@/systems/mesh/primDrawHandles';
+import type { BoundingBox } from '@/core/math/BoundingBox';
 import { applyVertexToolPlacement, shouldAutoCommitFace } from '@/systems/mesh/faceDrawing';
 import {
   nearestEdgeScreen,
@@ -34,11 +47,13 @@ import {
   pickVerticalPlane,
   pickViewPlane,
   snapVec3,
+  vertexToScreen,
 } from '@/systems/viewport/pick3D';
 import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layerSystem';
 import type { EdgeKey } from '@/systems/selection/selectionSystem';
 import {
   isAdditiveSelection,
+  effectiveSelectionMode,
   supportsSelectionMarquee,
   supportsVertexPickDrag,
   vertexPickSelection,
@@ -68,9 +83,20 @@ export function useViewport3DInteraction(
   const navLastRef = useRef({ x: 0, y: 0 });
   const dragRef = useRef(createTransformDragState());
   const modelingDragRef = useRef(createModelingDragState());
-  const primDragRef = useRef<{ active: boolean; anchor: Vec3 | null }>({
+  const primDragRef = useRef<{
+    active: boolean;
+    mode: 'create-base' | 'create-extent' | 'handle';
+    anchor: Vec3 | null;
+    screen: { x: number; y: number } | null;
+    handle: PrimDrawHandle | null;
+    dragStart: { bounds: BoundingBox; world: Vec3 } | null;
+  }>({
     active: false,
+    mode: 'create-base',
     anchor: null,
+    screen: null,
+    handle: null,
+    dragStart: null,
   });
   useEffect(() => {
     const container = containerRef.current;
@@ -82,6 +108,31 @@ export function useViewport3DInteraction(
     };
 
     const getRenderer = () => rendererRef.current;
+
+    const pickHandleWorld = (
+      sx: number,
+      sy: number,
+      handle: PrimDrawHandle,
+      bounds: BoundingBox,
+    ) => {
+      const renderer = getRenderer();
+      const canvas = renderer?.renderer.domElement;
+      if (!renderer || !canvas) return null;
+      const state = useEditorStore.getState();
+      const pivot = handle.kind === 'center' ? boundsCenter(bounds) : handle.position;
+      const raw = pickViewPlane(renderer.camera, canvas, sx, sy, pivot);
+      return raw ? snapVec3(raw, state.snap) : null;
+    };
+
+    const hitPrimHandle = (sx: number, sy: number, draw: NonNullable<ReturnType<typeof useEditorStore.getState>['primDraw']>) => {
+      const renderer = getRenderer();
+      const canvas = renderer?.renderer.domElement;
+      if (!renderer || !canvas || !boundsHasVisibleSize(draw.bounds)) return null;
+      const handles = buildPrimDrawHandles(draw.bounds, draw.phase, draw.extentAxis);
+      return hitTestPrimDrawHandleScreen(sx, sy, handles, (v) =>
+        vertexToScreen(renderer.camera, canvas, v),
+      );
+    };
 
     const pickPrim = (sx: number, sy: number, phase: 'base' | 'extent', origin?: Vec3) => {
       const renderer = getRenderer();
@@ -100,16 +151,18 @@ export function useViewport3DInteraction(
       if (!renderer) return;
       const state = useEditorStore.getState();
       const canvas = renderer.renderer.domElement;
-      const visibleVerts = visibleVertexIndices(state.mesh);
+      const mesh = state.getActiveMesh();
+      const visibleVerts = visibleVertexIndices(mesh);
       const commitFace = (verts: number[], label = 'Add Face') => {
         const fresh = useEditorStore.getState();
         let createdFace = -1;
         fresh.runCommand(label, () => {
-          const fi = fresh.mesh.faces.length;
+          const active = fresh.getActiveMesh();
+          const fi = active.faces.length;
           createdFace = fi;
-          fresh.mesh.faces.push([...verts]);
-          fresh.mesh.faceLayers.push(fresh.mesh.activeLayerId);
-          fresh.mesh.groups[fresh.groupSel]?.faces.push(fi);
+          active.faces.push([...verts]);
+          active.faceLayers.push(active.activeLayerId);
+          active.groups[fresh.groupSel]?.faces.push(fi);
         });
         const latest = useEditorStore.getState();
         latest.setWipFace([]);
@@ -136,19 +189,20 @@ export function useViewport3DInteraction(
       };
 
       if (state.tool === 'vertex') {
-        const vi = nearestVertexScreen(renderer.camera, canvas, state.mesh, sx, sy, visibleVerts);
+        const vi = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
         const wp =
           vi >= 0
-            ? state.mesh.vertices[vi]
+            ? mesh.vertices[vi]
             : pickGroundPlane(renderer.camera, canvas, sx, sy);
         if (!wp) return;
         const p = snapVec3(wp, state.snap);
         let placedVertex = vi;
         if (vi < 0) {
           state.runCommand('Add Vertex', () => {
-            placedVertex = state.mesh.vertices.length;
-            state.mesh.vertices.push({ x: p.x, y: p.y, z: p.z });
-            state.mesh.vertexLayers.push(state.mesh.activeLayerId);
+            const active = state.getActiveMesh();
+            placedVertex = active.vertices.length;
+            active.vertices.push({ x: p.x, y: p.y, z: p.z });
+            active.vertexLayers.push(active.activeLayerId);
           });
         }
         if (placedVertex >= 0) useVertexForFaceFill(placedVertex);
@@ -156,7 +210,7 @@ export function useViewport3DInteraction(
       }
 
       if (state.tool === 'face') {
-        const vi = nearestVertexScreen(renderer.camera, canvas, state.mesh, sx, sy, visibleVerts);
+        const vi = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
         if (vi < 0) return;
         const fresh = useEditorStore.getState();
         const wip = [...fresh.wipFace];
@@ -176,7 +230,12 @@ export function useViewport3DInteraction(
       }
 
       if (supportsSelectionMarquee(state.tool)) {
-        state.applyClickSelection3D(renderer.camera, canvas, sx, sy, shiftKey, ctrlKey);
+        const mode = effectiveSelectionMode(state.tool, state.selectionMode);
+        if (mode === 'object') {
+          state.applyObjectClickSelection('3d', sx, sy, shiftKey, ctrlKey, renderer.camera, canvas);
+        } else {
+          state.applyClickSelection3D(renderer.camera, canvas, sx, sy, shiftKey, ctrlKey);
+        }
       }
     };
 
@@ -213,25 +272,58 @@ export function useViewport3DInteraction(
       dragRef.current.isDragging = false;
 
       if (state.primDraw) {
-        const phase = state.primDraw.phase;
-        const origin = phase === 'extent' ? boundsCenter(state.primDraw.bounds) : undefined;
+        const draw = state.primDraw;
+        const hit = hitPrimHandle(sx, sy, draw);
+
+        if (hit) {
+          const p0 = pickHandleWorld(sx, sy, hit, draw.bounds) ?? hit.position;
+          primDragRef.current = {
+            active: true,
+            mode: 'handle',
+            anchor: p0,
+            screen: { x: sx, y: sy },
+            handle: hit,
+            dragStart: { bounds: draw.bounds, world: p0 },
+          };
+          renderer.setCadPrimPreview(draw, hit.id);
+          container.setPointerCapture(e.pointerId);
+          return;
+        }
+
+        const phase = draw.phase;
+        const origin = phase === 'extent' ? boundsCenter(draw.bounds) : undefined;
         const p0 = pickPrim(sx, sy, phase, origin);
         if (!p0) return;
-        primDragRef.current = { active: true, anchor: p0 };
+        primDragRef.current = {
+          active: true,
+          mode: phase === 'base' ? 'create-base' : 'create-extent',
+          anchor: p0,
+          screen: { x: sx, y: sy },
+          handle: null,
+          dragStart: null,
+        };
         if (phase === 'base') {
-          state.setPrimDraw(updatePrimDrag3D(state.primDraw, p0, p0));
+          state.setPrimDraw(updatePrimDrag3D(draw, p0, p0));
         } else {
-          state.setPrimDraw({ ...state.primDraw, anchor: p0, cursor: p0 });
+          state.setPrimDraw({ ...draw, anchor: p0, cursor: p0 });
         }
         container.setPointerCapture(e.pointerId);
         return;
       }
 
-      const visibleVerts = visibleVertexIndices(state.mesh);
-      const visibleFaces = visibleFaceIndices(state.mesh);
-      const viPick = nearestVertexScreen(renderer.camera, canvas, state.mesh, sx, sy, visibleVerts);
+      const mesh = state.getActiveMesh();
+      const visibleVerts = visibleVertexIndices(mesh);
+      const visibleFaces = visibleFaceIndices(mesh);
+      const viPick = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
 
       if (isTransformTool(state.tool)) {
+        if (
+          state.selectionMode === 'object' &&
+          beginObjectTransformDrag(dragRef.current, state.tool, sx, sy)
+        ) {
+          container.setPointerCapture(e.pointerId);
+          return;
+        }
         const transformVerts = state.selectedTransformVerts();
         if (
           beginTransformDragFromSelection(
@@ -241,7 +333,7 @@ export function useViewport3DInteraction(
             sy,
             viPick,
             transformVerts,
-            state.mesh.vertices.map((v) => ({ ...v })),
+            mesh.vertices.map((v) => ({ ...v })),
           )
         ) {
           container.setPointerCapture(e.pointerId);
@@ -261,7 +353,7 @@ export function useViewport3DInteraction(
           dragRef.current,
           { x: sx, y: sy },
           { vi: viPick },
-          state.mesh.vertices.map((v) => ({ ...v })),
+          mesh.vertices.map((v) => ({ ...v })),
         );
         container.setPointerCapture(e.pointerId);
         return;
@@ -271,13 +363,13 @@ export function useViewport3DInteraction(
         if (isModelingTool(state.tool)) {
           let hitSelected = false;
           if (state.tool === 'extrude' || state.tool === 'inset') {
-            const fi = pickFaceMesh3D(renderer.camera, canvas, state.mesh, sx, sy, visibleFaces);
+            const fi = pickFaceMesh3D(renderer.camera, canvas, mesh, sx, sy, visibleFaces);
             hitSelected = fi >= 0 && state.selFaces.has(fi);
           } else if (state.tool === 'bevel') {
             const edge = nearestEdgeScreen(
               renderer.camera,
               canvas,
-              state.mesh,
+              mesh,
               sx,
               sy,
               visibleVerts,
@@ -342,12 +434,39 @@ export function useViewport3DInteraction(
       }
 
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
-        const anchor = primDragRef.current.anchor;
-        const phase = state.primDraw.phase;
-        const origin = phase === 'extent' ? boundsCenter(state.primDraw.bounds) : undefined;
+        const drag = primDragRef.current;
+        const draw = state.primDraw;
+
+        if (drag.mode === 'handle' && drag.handle) {
+          const p1 = pickHandleWorld(sx, sy, drag.handle, drag.dragStart?.bounds ?? draw.bounds);
+          if (p1) {
+            const nextBounds = applyHandleDrag(
+              drag.dragStart?.bounds ?? draw.bounds,
+              drag.handle,
+              p1,
+              state.snap,
+              drag.dragStart ?? undefined,
+            );
+            const updated = constrainPrimDrawBounds({ ...draw, bounds: nextBounds, cursor: p1 });
+            state.setPrimDraw(updated);
+            renderer.setCadPrimPreview(updated, drag.handle.id);
+          }
+          return;
+        }
+
+        const phase = draw.phase;
+        const origin = phase === 'extent' ? boundsCenter(draw.bounds) : undefined;
         const p1 = pickPrim(sx, sy, phase, origin);
-        if (p1) state.setPrimDraw(updatePrimDrag3D(state.primDraw, anchor, p1));
+        if (p1 && drag.anchor) state.setPrimDraw(updatePrimDrag3D(draw, drag.anchor, p1));
         return;
+      }
+
+      if (state.primDraw && !primDragRef.current.active) {
+        const hit = hitPrimHandle(sx, sy, state.primDraw);
+        renderer.setCadPrimPreview(state.primDraw, hit?.id ?? null);
+        container.style.cursor = handleCursor(hit);
+      } else if (!state.primDraw) {
+        container.style.cursor = '';
       }
 
       if (isMarqueeActive()) {
@@ -359,7 +478,23 @@ export function useViewport3DInteraction(
       if (isTransformTool(state.tool)) {
         if (tryStartTransformDrag(drag, sx, sy)) {
           if (state.tool === 'move') {
-            init3dMovePlane(drag, renderer.camera, canvas, drag.mouseDownPos!.x, drag.mouseDownPos!.y);
+            if (drag.dragOrigObjects?.length) {
+              init3dObjectMovePlane(
+                drag,
+                renderer.camera,
+                canvas,
+                drag.mouseDownPos!.x,
+                drag.mouseDownPos!.y,
+              );
+            } else {
+              init3dMovePlane(
+                drag,
+                renderer.camera,
+                canvas,
+                drag.mouseDownPos!.x,
+                drag.mouseDownPos!.y,
+              );
+            }
           }
         }
         if (drag.isDragging) {
@@ -417,9 +552,10 @@ export function useViewport3DInteraction(
                     : state.selectedTransformVerts()
                 : state.selectedTransformVerts();
             moveSet.forEach((vi) => {
-              state.mesh.vertices[vi].x = drag.dragOrigVerts[vi].x + dx;
-              state.mesh.vertices[vi].y = drag.dragOrigVerts[vi].y + dy;
-              state.mesh.vertices[vi].z = drag.dragOrigVerts[vi].z + dz;
+              const activeMesh = state.getActiveMesh();
+              activeMesh.vertices[vi].x = drag.dragOrigVerts[vi].x + dx;
+              activeMesh.vertices[vi].y = drag.dragOrigVerts[vi].y + dy;
+              activeMesh.vertices[vi].z = drag.dragOrigVerts[vi].z + dz;
             });
             state.notifyChange();
           }
@@ -450,15 +586,32 @@ export function useViewport3DInteraction(
       const marqueeApplied = !!liveMarquee && isMarqueeDone(liveMarquee);
       if (isMarqueeActive()) endMarquee(e.shiftKey, e.ctrlKey);
 
-      if (primDragRef.current.active && state.primDraw) {
+      if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         const min = state.snapSize;
         const draw = state.primDraw;
-        if (draw.phase === 'base' && hasMinBaseSize(draw, min)) {
-          state.setPrimDraw({ ...draw, phase: 'extent', anchor: null, cursor: null });
-        } else if (draw.phase === 'extent' && hasMinExtentSize(draw, min)) {
-          state.commitPrimDraw();
+        const mode = primDragRef.current.mode;
+        const drag = primDragRef.current;
+        const clickPoint = primDragRef.current.anchor;
+        const pointerMoved = drag.screen ? !isClickNotDrag(drag.screen, sx, sy) : true;
+
+        const next = resolvePrimDragRelease(draw, mode, min, '3d', clickPoint, pointerMoved);
+        if (next) {
+          state.setPrimDraw(next);
         }
-        primDragRef.current = { active: false, anchor: null };
+
+        primDragRef.current = {
+          active: false,
+          mode: 'create-base',
+          anchor: null,
+          screen: null,
+          handle: null,
+          dragStart: null,
+        };
+        const renderer = getRenderer();
+        const freshDraw = useEditorStore.getState().primDraw;
+        if (renderer && freshDraw) {
+          renderer.setCadPrimPreview(freshDraw, null);
+        }
       }
 
       const drag = dragRef.current;
@@ -542,6 +695,18 @@ export function useViewport3DInteraction(
       const renderer = getRenderer();
       if (!renderer) return;
       e.preventDefault();
+      const state = useEditorStore.getState();
+      if (state.primDraw?.phase === 'extent') {
+        const next = adjustPrimDrawExtentByWheel(
+          state.primDraw,
+          e.deltaY,
+          state.snapSize,
+          e.shiftKey,
+        );
+        state.setPrimDraw(next);
+        renderer.setCadPrimPreview(next);
+        return;
+      }
       renderer.zoom(e.deltaY);
       renderer.requestRender();
     };

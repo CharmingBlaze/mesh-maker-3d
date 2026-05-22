@@ -1,18 +1,31 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { VIEW2D_DEFS, s2w, type View2DKey } from '@/core/math/projection';
-import { drawView2D } from '@/systems/viewport/drawView2D';
+import { drawSceneView2D } from '@/systems/viewport/drawView2D';
+import { buildSceneRenderEntries } from '@/systems/scene/sceneObjectHelpers';
 import { useEditorStore } from '@/store/editorStore';
 import { editorEvents } from '@/core/events/EventBus';
 import { SnapshotCommand } from '@/core/commands/Command';
 import {
   screenToWorld,
-  hasMinBaseSize,
-  hasMinExtentSize,
   updatePrimDrag,
+  constrainPrimDrawBounds,
+  resolvePrimDragRelease,
+  isClickNotDrag,
+  adjustPrimDrawExtentByWheel,
 } from '@/hooks/primDrawHelpers';
+import {
+  applyHandleDrag,
+  buildPrimDrawHandles,
+  boundsHasVisibleSize,
+  handleCursor,
+  hitTestPrimDrawHandle2D,
+  type PrimDrawHandle,
+} from '@/systems/mesh/primDrawHandles';
+import type { BoundingBox } from '@/core/math/BoundingBox';
 import type { Vec3 } from '@/core/math/Vec3';
 import {
   isAdditiveSelection,
+  effectiveSelectionMode,
   nearestEdge2D,
   nearestFace2D,
   nearestVertex2D,
@@ -24,6 +37,7 @@ import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layer
 import { applyVertexToolPlacement, shouldAutoCommitFace } from '@/systems/mesh/faceDrawing';
 import {
   applyTransformDrag2D,
+  beginObjectTransformDrag,
   beginTransformDragFromSelection,
   beginTransformPending,
   createTransformDragState,
@@ -59,9 +73,13 @@ export function useViewport2D(vpKey: View2DKey) {
   } = useMarqueeRect();
   const primDragRef = useRef<{
     active: boolean;
+    mode: 'create-base' | 'create-extent' | 'handle';
     anchor: Vec3 | null;
     screen: { x: number; y: number } | null;
-  }>({ active: false, anchor: null, screen: null });
+    handle: PrimDrawHandle | null;
+    dragStart: { bounds: BoundingBox; world: Vec3 } | null;
+  }>({ active: false, mode: 'create-base', anchor: null, screen: null, handle: null, dragStart: null });
+  const [primHandleId, setPrimHandleId] = useState<string | null>(null);
 
   const dragRef = useRef(createTransformDragState());
   const modelingDragRef = useRef(createModelingDragState());
@@ -77,18 +95,24 @@ export function useViewport2D(vpKey: View2DKey) {
     if (canvas.height !== height) canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    drawView2D(
+    const entries = buildSceneRenderEntries(
+      state.sceneGraph,
+      state.meshes,
+      state.activeMeshId,
+      state.selectedNodeIds,
+    );
+    drawSceneView2D(
       ctx,
       canvas.width,
       canvas.height,
       vpKey,
-      state.mesh,
+      entries,
+      state.activeMeshId,
+      state.selectionMode,
       state.vp2d[vpKey],
       state.selVerts,
       state.selEdges,
       state.selFaces,
-      visibleVertexIndices(state.mesh),
-      visibleFaceIndices(state.mesh),
       state.wipFace,
       selRect,
       state.primDraw,
@@ -96,8 +120,9 @@ export function useViewport2D(vpKey: View2DKey) {
         snapSize: state.snapSize,
         showGrid: state.showGrid3D,
       },
+      primHandleId,
     );
-  }, [vpKey, selRect]);
+  }, [vpKey, selRect, primHandleId]);
 
   useEffect(() => {
     render();
@@ -118,6 +143,16 @@ export function useViewport2D(vpKey: View2DKey) {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const state = useEditorStore.getState();
+      if (state.primDraw?.phase === 'extent') {
+        const next = adjustPrimDrawExtentByWheel(
+          state.primDraw,
+          e.deltaY,
+          state.snapSize,
+          e.shiftKey,
+        );
+        state.setPrimDraw(next);
+        return;
+      }
       const r = container.getBoundingClientRect();
       const sx = e.clientX - r.left;
       const sy = e.clientY - r.top;
@@ -144,7 +179,8 @@ export function useViewport2D(vpKey: View2DKey) {
       const state = useEditorStore.getState();
       const vd = VIEW2D_DEFS[vpKey];
       const vpState = state.vp2d[vpKey];
-      const visibleVerts = visibleVertexIndices(state.mesh);
+      const mesh = state.getActiveMesh();
+      const visibleVerts = visibleVertexIndices(mesh);
       const wc = s2w(sx, sy, vpState.pan, vpState.zoom);
       const wx = state.snap(wc.x);
       const wy = state.snap(wc.y);
@@ -152,10 +188,10 @@ export function useViewport2D(vpKey: View2DKey) {
       const commitFace = (verts: number[], label = 'Add Face') => {
         const fresh = useEditorStore.getState();
         fresh.runCommand(label, () => {
-          const fi = fresh.mesh.faces.length;
-          fresh.mesh.faces.push([...verts]);
-          fresh.mesh.faceLayers.push(fresh.mesh.activeLayerId);
-          fresh.mesh.groups[fresh.groupSel]?.faces.push(fi);
+          const fi = fresh.getActiveMesh().faces.length;
+          fresh.getActiveMesh().faces.push([...verts]);
+          fresh.getActiveMesh().faceLayers.push(fresh.getActiveMesh().activeLayerId);
+          fresh.getActiveMesh().groups[fresh.groupSel]?.faces.push(fi);
         });
         fresh.setWipFace([]);
       };
@@ -163,11 +199,11 @@ export function useViewport2D(vpKey: View2DKey) {
       if (state.tool === 'vertex') {
         let placedVertex = -1;
         state.runCommand('Add Vertex', () => {
-          const vi = nearestVertex2D(sx, sy, vpKey, state.mesh, vpState, { visibleVertices: visibleVerts });
+          const vi = nearestVertex2D(sx, sy, vpKey, mesh, vpState, { visibleVertices: visibleVerts });
           if (vi < 0) {
-            placedVertex = state.mesh.vertices.length;
-            state.mesh.vertices.push({ x: wp3.x, y: wp3.y, z: wp3.z });
-            state.mesh.vertexLayers.push(state.mesh.activeLayerId);
+            placedVertex = mesh.vertices.length;
+            mesh.vertices.push({ x: wp3.x, y: wp3.y, z: wp3.z });
+            mesh.vertexLayers.push(mesh.activeLayerId);
           } else {
             placedVertex = vi;
           }
@@ -190,7 +226,7 @@ export function useViewport2D(vpKey: View2DKey) {
           }
         }
       } else if (state.tool === 'face') {
-        const vi = nearestVertex2D(sx, sy, vpKey, state.mesh, vpState, { visibleVertices: visibleVerts });
+        const vi = nearestVertex2D(sx, sy, vpKey, mesh, vpState, { visibleVertices: visibleVerts });
         if (vi >= 0) {
           const wip = [...state.wipFace];
           if (wip.length >= 3 && wip[0] === vi) {
@@ -206,7 +242,12 @@ export function useViewport2D(vpKey: View2DKey) {
           state.notifyChange();
         }
       } else if (supportsSelectionMarquee(state.tool)) {
-        state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+        const mode = effectiveSelectionMode(state.tool, state.selectionMode);
+        if (mode === 'object') {
+          state.applyObjectClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+        } else {
+          state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+        }
       }
     },
     [vpKey],
@@ -226,11 +267,49 @@ export function useViewport2D(vpKey: View2DKey) {
       state.setActiveVP(vpKey);
 
       if (state.primDraw && e.button === 0) {
-        const p0 = screenToWorld(vpKey, sx, sy, state.vp2d[vpKey], state.snap);
-        primDragRef.current = { active: true, anchor: p0, screen: { x: sx, y: sy } };
+        const vpState = state.vp2d[vpKey];
+        const p0 = screenToWorld(vpKey, sx, sy, vpState, state.snap);
+        const handles = buildPrimDrawHandles(
+          state.primDraw.bounds,
+          state.primDraw.phase,
+          state.primDraw.extentAxis,
+        );
+        const hit = boundsHasVisibleSize(state.primDraw.bounds)
+          ? hitTestPrimDrawHandle2D(sx, sy, handles, vpKey, vpState.pan, vpState.zoom)
+          : null;
+
+        if (hit) {
+          primDragRef.current = {
+            active: true,
+            mode: 'handle',
+            anchor: p0,
+            screen: { x: sx, y: sy },
+            handle: hit,
+            dragStart: { bounds: state.primDraw.bounds, world: p0 },
+          };
+          setPrimHandleId(hit.id);
+          return;
+        }
+
         if (state.primDraw.phase === 'base') {
+          primDragRef.current = {
+            active: true,
+            mode: 'create-base',
+            anchor: p0,
+            screen: { x: sx, y: sy },
+            handle: null,
+            dragStart: null,
+          };
           state.setPrimDraw(updatePrimDrag(state.primDraw, vpKey, p0, p0));
         } else {
+          primDragRef.current = {
+            active: true,
+            mode: 'create-extent',
+            anchor: p0,
+            screen: { x: sx, y: sy },
+            handle: null,
+            dragStart: null,
+          };
           state.setPrimDraw({ ...state.primDraw, anchor: p0, cursor: p0 });
         }
         return;
@@ -244,13 +323,20 @@ export function useViewport2D(vpKey: View2DKey) {
       }
 
       const vpState = state.vp2d[vpKey];
-      const visibleVerts = visibleVertexIndices(state.mesh);
-      const visibleFaces = visibleFaceIndices(state.mesh);
-      const viPick = nearestVertex2D(sx, sy, vpKey, state.mesh, vpState, {
+      const mesh = state.getActiveMesh();
+      const visibleVerts = visibleVertexIndices(mesh);
+      const visibleFaces = visibleFaceIndices(mesh);
+      const viPick = nearestVertex2D(sx, sy, vpKey, mesh, vpState, {
         visibleVertices: visibleVerts,
       });
 
       if (isTransformTool(state.tool)) {
+        if (
+          state.selectionMode === 'object' &&
+          beginObjectTransformDrag(dragRef.current, state.tool, sx, sy)
+        ) {
+          return;
+        }
         const transformVerts = state.selectedTransformVerts();
         if (
           beginTransformDragFromSelection(
@@ -260,7 +346,7 @@ export function useViewport2D(vpKey: View2DKey) {
             sy,
             viPick,
             transformVerts,
-            state.mesh.vertices.map((v) => ({ ...v })),
+            mesh.vertices.map((v) => ({ ...v })),
           )
         ) {
           return;
@@ -279,7 +365,7 @@ export function useViewport2D(vpKey: View2DKey) {
           dragRef.current,
           { x: sx, y: sy },
           { vi: viPick },
-          state.mesh.vertices.map((v) => ({ ...v })),
+          mesh.vertices.map((v) => ({ ...v })),
         );
         return;
       }
@@ -288,10 +374,10 @@ export function useViewport2D(vpKey: View2DKey) {
         if (isModelingTool(state.tool)) {
           let hitSelected = false;
           if (state.tool === 'extrude' || state.tool === 'inset') {
-            const fi = nearestFace2D(sx, sy, vpKey, state.mesh, vpState, { visibleFaces });
+            const fi = nearestFace2D(sx, sy, vpKey, mesh, vpState, { visibleFaces });
             hitSelected = fi >= 0 && state.selFaces.has(fi);
           } else if (state.tool === 'bevel') {
-            const edge = nearestEdge2D(sx, sy, vpKey, state.mesh, vpState, {
+            const edge = nearestEdge2D(sx, sy, vpKey, mesh, vpState, {
               visibleVertices: visibleVerts,
               visibleFaces,
             });
@@ -330,10 +416,27 @@ export function useViewport2D(vpKey: View2DKey) {
 
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         let p1 = screenToWorld(vpKey, sx, sy, vpState, state.snap);
-        const anchor = primDragRef.current.anchor;
-        if (state.primDraw.phase === 'extent' && primDragRef.current.screen) {
+        const drag = primDragRef.current;
+
+        if (drag.mode === 'handle' && drag.handle) {
+          const nextBounds = applyHandleDrag(
+            drag.dragStart?.bounds ?? state.primDraw.bounds,
+            drag.handle,
+            p1,
+            state.snap,
+            drag.dragStart ?? undefined,
+          );
+          state.setPrimDraw(
+            constrainPrimDrawBounds({ ...state.primDraw, bounds: nextBounds, cursor: p1 }),
+          );
+          return;
+        }
+
+        const anchor = drag.anchor;
+        if (!anchor) return;
+        if (state.primDraw.phase === 'extent' && drag.screen && drag.mode === 'create-extent') {
           const axis = state.primDraw.extentAxis;
-          const start = primDragRef.current.screen;
+          const start = drag.screen;
           const raw =
             axis === 'y'
               ? -(sy - start.y) / vpState.zoom
@@ -343,6 +446,24 @@ export function useViewport2D(vpKey: View2DKey) {
         const updated = updatePrimDrag(state.primDraw, vpKey, anchor, p1);
         state.setPrimDraw(updated);
         return;
+      }
+
+      if (state.primDraw && !primDragRef.current.active) {
+        const handles = buildPrimDrawHandles(
+          state.primDraw.bounds,
+          state.primDraw.phase,
+          state.primDraw.extentAxis,
+        );
+        const hit = boundsHasVisibleSize(state.primDraw.bounds)
+          ? hitTestPrimDrawHandle2D(sx, sy, handles, vpKey, vpState.pan, vpState.zoom)
+          : null;
+        const nextId = hit?.id ?? null;
+        if (nextId !== primHandleId) setPrimHandleId(nextId);
+        if (containerRef.current) {
+          containerRef.current.style.cursor = handleCursor(hit);
+        }
+      } else if (containerRef.current && !state.primDraw) {
+        containerRef.current.style.cursor = '';
       }
 
       if (panningRef.current) {
@@ -395,9 +516,10 @@ export function useViewport2D(vpKey: View2DKey) {
                   : state.selectedTransformVerts()
               : state.selectedTransformVerts();
           moveSet.forEach((vi) => {
-            state.mesh.vertices[vi].x = drag.dragOrigVerts[vi].x + deltaWorld.x;
-            state.mesh.vertices[vi].y = drag.dragOrigVerts[vi].y + deltaWorld.y;
-            state.mesh.vertices[vi].z = drag.dragOrigVerts[vi].z + deltaWorld.z;
+            const activeMesh = state.getActiveMesh();
+            activeMesh.vertices[vi].x = drag.dragOrigVerts[vi].x + deltaWorld.x;
+            activeMesh.vertices[vi].y = drag.dragOrigVerts[vi].y + deltaWorld.y;
+            activeMesh.vertices[vi].z = drag.dragOrigVerts[vi].z + deltaWorld.z;
           });
           state.notifyChange();
         }
@@ -424,17 +546,33 @@ export function useViewport2D(vpKey: View2DKey) {
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         const min = state.snapSize;
         const draw = state.primDraw;
-        if (draw.phase === 'base' && hasMinBaseSize(draw, min)) {
-          state.setPrimDraw({
-            ...draw,
-            phase: 'extent',
-            anchor: null,
-            cursor: null,
-          });
-        } else if (draw.phase === 'extent' && hasMinExtentSize(draw, min)) {
-          state.commitPrimDraw();
+        const mode = primDragRef.current.mode;
+        const drag = primDragRef.current;
+        const clickPoint = primDragRef.current.anchor;
+        const pointerMoved = drag.screen
+          ? !isClickNotDrag(drag.screen, sx, sy)
+          : true;
+
+        const next = resolvePrimDragRelease(
+          draw,
+          mode,
+          min,
+          vpKey,
+          clickPoint,
+          pointerMoved,
+        );
+        if (next) {
+          state.setPrimDraw(next);
         }
-        primDragRef.current = { active: false, anchor: null, screen: null };
+
+        primDragRef.current = {
+          active: false,
+          mode: 'create-base',
+          anchor: null,
+          screen: null,
+          handle: null,
+          dragStart: null,
+        };
         dragRef.current.mouseDownPos = null;
         return;
       }
@@ -508,7 +646,12 @@ export function useViewport2D(vpKey: View2DKey) {
     onMouseLeave: () => {
       panningRef.current = false;
       clearMarquee();
-      primDragRef.current = { active: false, anchor: null, screen: null };
+      if (primDragRef.current.active) {
+        primDragRef.current = {
+          ...primDragRef.current,
+          active: false,
+        };
+      }
       dragRef.current.transformPending = false;
       dragRef.current.isDragging = false;
     },
