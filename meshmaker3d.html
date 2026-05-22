@@ -1,0 +1,1662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MeshMaker 3D</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap');
+
+  :root {
+    --bg0: #0a0c10;
+    --bg1: #0f1218;
+    --bg2: #161b24;
+    --bg3: #1e2530;
+    --bg4: #252d3a;
+    --border: #2a3545;
+    --border2: #3a4a60;
+    --accent: #00d4ff;
+    --accent2: #ff6b35;
+    --accent3: #a8ff3e;
+    --sel: #ffaa00;
+    --text: #c8d8e8;
+    --text2: #7a9ab8;
+    --text3: #4a6a88;
+    --panel-w: 148px;
+    --right-w: 170px;
+    --toolbar-h: 26px;
+    --status-h: 22px;
+    --mono: 'Share Tech Mono', monospace;
+    --ui: 'Rajdhani', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+
+  body {
+    background: var(--bg0);
+    color: var(--text);
+    font-family: var(--ui);
+    font-size: 12px;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── MENU BAR ── */
+  #menubar {
+    height: var(--toolbar-h);
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: stretch;
+    padding: 0;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 100;
+  }
+  .menu-label {
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    border-right: 1px solid var(--border);
+    font-weight: bold;
+  }
+  .menu-group { display: flex; align-items: stretch; }
+  .menu-btn {
+    padding: 0 9px;
+    display: flex;
+    align-items: center;
+    font-family: var(--ui);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text2);
+    cursor: pointer;
+    border: none;
+    background: none;
+    border-right: 1px solid var(--border);
+    transition: background 0.1s, color 0.1s;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+  .menu-btn:hover { background: var(--bg3); color: var(--accent); }
+  .menu-btn.danger:hover { color: var(--accent2); }
+  .menu-sep { width: 1px; background: var(--border); margin: 4px 2px; }
+
+  /* ── MAIN LAYOUT ── */
+  #main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── LEFT PANEL ── */
+  #left-panel {
+    width: var(--panel-w);
+    background: var(--bg1);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .panel-hdr {
+    padding: 4px 8px 3px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--text3);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg0);
+  }
+
+  .tool-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 1px;
+  }
+
+  .tool-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 4px;
+    background: var(--bg2);
+    border: none;
+    color: var(--text2);
+    cursor: pointer;
+    font-family: var(--ui);
+    font-size: 10px;
+    font-weight: 500;
+    gap: 3px;
+    transition: background 0.1s, color 0.1s;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .tool-btn:hover { background: var(--bg4); color: var(--text); }
+  .tool-btn.active {
+    background: #0a2a40;
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .tool-btn .icon { font-size: 16px; line-height: 1; }
+
+  .prim-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    padding: 1px;
+    border-bottom: 1px solid var(--border);
+  }
+  .prim-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 2px;
+    background: var(--bg2);
+    border: none;
+    color: var(--text3);
+    cursor: pointer;
+    font-family: var(--ui);
+    font-size: 9px;
+    font-weight: 500;
+    gap: 2px;
+    transition: background 0.1s, color 0.1s;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .prim-btn:hover { background: var(--bg4); color: var(--accent3); }
+  .prim-icon { font-size: 14px; }
+
+  .props-block { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .prop-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 4px;
+  }
+  .prop-row:last-child { margin-bottom: 0; }
+  .prop-lbl {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--text3);
+    width: 22px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+  }
+  .prop-row input[type=number] {
+    flex: 1;
+    background: var(--bg0);
+    border: 1px solid var(--border2);
+    color: var(--accent);
+    padding: 2px 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    border-radius: 2px;
+    min-width: 0;
+  }
+  .prop-row input[type=number]:focus { outline: none; border-color: var(--accent); }
+  .prop-row input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .prop-val {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accent3);
+    min-width: 22px;
+    text-align: right;
+  }
+
+  .small-btn-row { display: flex; gap: 3px; flex-wrap: wrap; }
+  .small-btn {
+    padding: 3px 7px;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--text2);
+    font-family: var(--ui);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 2px;
+    letter-spacing: 0.04em;
+    transition: background 0.1s, color 0.1s;
+  }
+  .small-btn:hover { background: var(--bg4); color: var(--accent); border-color: var(--accent); }
+  .small-btn.active { background: #0a2a40; color: var(--accent); border-color: var(--accent); }
+
+  /* ── VIEWPORTS ── */
+  #viewport-area {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    background: #050709;
+    padding: 2px;
+    min-width: 0;
+  }
+
+  .vp {
+    position: relative;
+    background: #0c1018;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+  .vp canvas { display: block; width: 100%; height: 100%; }
+  .vp-label {
+    position: absolute;
+    top: 4px;
+    left: 6px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: rgba(0, 212, 255, 0.35);
+    pointer-events: none;
+    letter-spacing: 0.12em;
+  }
+  .vp-active { outline: 1px solid rgba(0, 212, 255, 0.4); }
+  .vp-active .vp-label { color: var(--accent); }
+
+  /* ── RIGHT PANEL ── */
+  #right-panel {
+    width: var(--right-w);
+    background: var(--bg1);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .list-box {
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    margin: 4px 6px;
+    max-height: 100px;
+    overflow-y: auto;
+    border-radius: 2px;
+  }
+  .list-box::-webkit-scrollbar { width: 4px; }
+  .list-box::-webkit-scrollbar-track { background: var(--bg0); }
+  .list-box::-webkit-scrollbar-thumb { background: var(--border2); }
+  .list-item {
+    padding: 3px 7px;
+    font-family: var(--ui);
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--text2);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .list-item:hover { background: var(--bg3); color: var(--text); }
+  .list-item.sel { background: #0a2a40; color: var(--accent); }
+
+  .rp-btns { display: flex; gap: 3px; padding: 0 6px 6px; flex-wrap: wrap; }
+
+  .stats-grid {
+    padding: 6px 8px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 8px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1px 0;
+  }
+  .stat-lbl { font-family: var(--mono); font-size: 9px; color: var(--text3); }
+  .stat-val { font-family: var(--mono); font-size: 10px; color: var(--accent3); }
+
+  /* ── STATUS BAR ── */
+  #statusbar {
+    height: var(--status-h);
+    background: var(--bg0);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    gap: 20px;
+    flex-shrink: 0;
+  }
+  .sb-item {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 0.05em;
+  }
+  .sb-item span { color: var(--text2); }
+  .sb-tool span { color: var(--accent); font-weight: bold; }
+  .sb-hint { margin-left: auto; color: var(--text3); font-size: 9px; }
+
+  /* ── DROPDOWN MENUS ── */
+  .dropdown { position: relative; display: inline-block; }
+  .dropdown-content {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    min-width: 160px;
+    z-index: 999;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  }
+  .dropdown:hover .dropdown-content,
+  .dropdown-content:hover { display: block; }
+  .dd-item {
+    display: block;
+    width: 100%;
+    padding: 5px 12px;
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-family: var(--ui);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .dd-item:hover { background: var(--bg4); color: var(--accent); }
+  .dd-item.danger:hover { color: var(--accent2); }
+  .dd-sep { height: 1px; background: var(--border2); margin: 2px 0; }
+  .dd-shortcut { float: right; font-family: var(--mono); font-size: 9px; color: var(--text3); }
+
+  /* ── MODAL ── */
+  #modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+  }
+  #modal-overlay.show { display: flex; }
+  .modal {
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    min-width: 260px;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.8);
+  }
+  .modal-hdr {
+    padding: 8px 12px;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-close { cursor: pointer; color: var(--text3); font-size: 14px; }
+  .modal-close:hover { color: var(--accent2); }
+  .modal-body { padding: 12px; }
+  .modal-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .modal-lbl { font-family: var(--mono); font-size: 10px; color: var(--text3); width: 70px; }
+  .modal-input {
+    flex: 1;
+    background: var(--bg0);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    padding: 4px 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .modal-input:focus { outline: none; border-color: var(--accent); }
+  .modal-footer { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; justify-content: flex-end; }
+  .modal-btn {
+    padding: 4px 14px;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--ui);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .modal-btn:hover { background: var(--bg4); color: var(--accent); border-color: var(--accent); }
+  .modal-btn.primary { background: #0a2a40; color: var(--accent); border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<!-- MENU BAR -->
+<div id="menubar">
+  <div class="menu-label">⬡ MESHMAKER 3D</div>
+
+  <div class="menu-group">
+    <div class="dropdown">
+      <button class="menu-btn">File ▾</button>
+      <div class="dropdown-content">
+        <button class="dd-item" onclick="newScene()">New Scene <span class="dd-shortcut">Ctrl+N</span></button>
+        <div class="dd-sep"></div>
+        <button class="dd-item" onclick="exportOBJ()">Export .OBJ <span class="dd-shortcut">Ctrl+E</span></button>
+        <button class="dd-item" onclick="exportSTL()">Export .STL</button>
+      </div>
+    </div>
+
+    <div class="dropdown">
+      <button class="menu-btn">Edit ▾</button>
+      <div class="dropdown-content">
+        <button class="dd-item" onclick="undo()">Undo <span class="dd-shortcut">Ctrl+Z</span></button>
+        <div class="dd-sep"></div>
+        <button class="dd-item" onclick="selectAll()">Select All <span class="dd-shortcut">A</span></button>
+        <button class="dd-item" onclick="invertSelection()">Invert Selection <span class="dd-shortcut">I</span></button>
+        <button class="dd-item" onclick="deselectAll()">Deselect <span class="dd-shortcut">D</span></button>
+        <div class="dd-sep"></div>
+        <button class="dd-item danger" onclick="deleteSelected()">Delete Selected <span class="dd-shortcut">Del</span></button>
+      </div>
+    </div>
+
+    <div class="dropdown">
+      <button class="menu-btn">Vertex ▾</button>
+      <div class="dropdown-content">
+        <button class="dd-item" onclick="weldVerts()">Weld Selected</button>
+        <button class="dd-item" onclick="weldAll()">Weld All (auto)</button>
+        <button class="dd-item" onclick="snapToGrid()">Snap to Grid</button>
+        <button class="dd-item" onclick="averageVerts()">Average Position</button>
+      </div>
+    </div>
+
+    <div class="dropdown">
+      <button class="menu-btn">Face ▾</button>
+      <div class="dropdown-content">
+        <button class="dd-item" onclick="flipNormals()">Flip Normals</button>
+        <button class="dd-item" onclick="subdivide()">Subdivide</button>
+        <button class="dd-item" onclick="triangulateFaces()">Triangulate</button>
+        <button class="dd-item" onclick="extrudeFaces()">Extrude Faces</button>
+        <button class="dd-item" onclick="smoothMesh()">Smooth (Laplacian)</button>
+      </div>
+    </div>
+
+    <div class="dropdown">
+      <button class="menu-btn">View ▾</button>
+      <div class="dropdown-content">
+        <button class="dd-item" onclick="toggleWireframe()">Toggle Wireframe <span class="dd-shortcut">W</span></button>
+        <button class="dd-item" onclick="toggleFlat()">Flat / Smooth Shading</button>
+        <button class="dd-item" onclick="frameAll()">Frame All <span class="dd-shortcut">F</span></button>
+        <button class="dd-item" onclick="resetViews()">Reset Views</button>
+        <div class="dd-sep"></div>
+        <button class="dd-item" onclick="toggleGrid3D()">Toggle 3D Grid</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div id="main">
+
+  <!-- LEFT PANEL -->
+  <div id="left-panel">
+    <div class="panel-hdr">Tools</div>
+    <div class="tool-group">
+      <button class="tool-btn active" id="t-select" onclick="setTool('select')"><span class="icon">↖</span>SELECT</button>
+      <button class="tool-btn" id="t-move" onclick="setTool('move')"><span class="icon">✥</span>MOVE</button>
+      <button class="tool-btn" id="t-rotate" onclick="setTool('rotate')"><span class="icon">↻</span>ROTATE</button>
+      <button class="tool-btn" id="t-scale" onclick="setTool('scale')"><span class="icon">⇲</span>SCALE</button>
+      <button class="tool-btn" id="t-vertex" onclick="setTool('vertex')"><span class="icon">●</span>VERTEX</button>
+      <button class="tool-btn" id="t-face" onclick="setTool('face')"><span class="icon">△</span>FACE</button>
+    </div>
+
+    <div class="panel-hdr" style="margin-top:2px">Primitives</div>
+    <div class="prim-group">
+      <button class="prim-btn" onclick="addPrimitive('box')"><span class="prim-icon">⬛</span>BOX</button>
+      <button class="prim-btn" onclick="addPrimitive('sphere')"><span class="prim-icon">●</span>SPHERE</button>
+      <button class="prim-btn" onclick="addPrimitive('cylinder')"><span class="prim-icon">⬤</span>CYLINDER</button>
+      <button class="prim-btn" onclick="addPrimitive('cone')"><span class="prim-icon">▲</span>CONE</button>
+      <button class="prim-btn" onclick="addPrimitive('plane')"><span class="prim-icon">▬</span>PLANE</button>
+      <button class="prim-btn" onclick="addPrimitive('torus')"><span class="prim-icon">◎</span>TORUS</button>
+    </div>
+
+    <div class="panel-hdr" style="margin-top:2px">Transform</div>
+    <div class="props-block">
+      <div class="prop-row"><span class="prop-lbl">X</span><input type="number" id="tx" value="0" step="5"></div>
+      <div class="prop-row"><span class="prop-lbl">Y</span><input type="number" id="ty" value="0" step="5"></div>
+      <div class="prop-row"><span class="prop-lbl">Z</span><input type="number" id="tz" value="0" step="5"></div>
+      <div class="small-btn-row" style="margin-top:5px">
+        <button class="small-btn" onclick="applyMove()">Move</button>
+        <button class="small-btn" onclick="applyRotate()">Rot</button>
+        <button class="small-btn" onclick="applyScale()">Scale</button>
+      </div>
+    </div>
+
+    <div class="panel-hdr" style="margin-top:2px">Snap / Grid</div>
+    <div class="props-block">
+      <div class="prop-row">
+        <span class="prop-lbl">Size</span>
+        <input type="range" id="snap-range" min="1" max="20" value="5" step="1" oninput="snapSize=parseInt(this.value);document.getElementById('snap-val').textContent=this.value">
+        <span class="prop-val" id="snap-val">5</span>
+      </div>
+      <div class="prop-row">
+        <input type="checkbox" id="snap-on" checked style="accent-color:var(--accent)">
+        <span style="color:var(--text2);font-size:10px;margin-left:2px">Snap to Grid</span>
+      </div>
+    </div>
+
+    <div class="panel-hdr" style="margin-top:2px">Display</div>
+    <div class="props-block">
+      <div class="small-btn-row">
+        <button class="small-btn" id="btn-wire" onclick="toggleWireframe()">Wire</button>
+        <button class="small-btn" id="btn-flat" onclick="toggleFlat()">Flat</button>
+        <button class="small-btn" onclick="frameAll()">Frame</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEWPORTS -->
+  <div id="viewport-area">
+    <div class="vp vp-active" id="vp-top"><canvas id="c-top"></canvas><span class="vp-label">TOP  [X / Z]</span></div>
+    <div class="vp" id="vp-front"><canvas id="c-front"></canvas><span class="vp-label">FRONT  [X / Y]</span></div>
+    <div class="vp" id="vp-side"><canvas id="c-side"></canvas><span class="vp-label">SIDE  [Z / Y]</span></div>
+    <div class="vp" id="vp-3d"><canvas id="c-3d"></canvas><span class="vp-label">3D VIEW  [orbit drag · scroll zoom]</span></div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div id="right-panel">
+    <div class="panel-hdr">Groups</div>
+    <div class="list-box" id="group-list"></div>
+    <div class="rp-btns">
+      <button class="small-btn" onclick="addGroup()">New</button>
+      <button class="small-btn" onclick="renameGroup()">Rename</button>
+      <button class="small-btn" onclick="assignGroup()">Assign</button>
+      <button class="small-btn" onclick="deleteGroup()">Del</button>
+    </div>
+
+    <div class="panel-hdr">Materials</div>
+    <div class="list-box" id="mat-list"></div>
+    <div class="rp-btns">
+      <button class="small-btn" onclick="addMaterial()">New</button>
+      <button class="small-btn" onclick="editMaterial()">Edit</button>
+      <button class="small-btn" onclick="assignMaterial()">Assign</button>
+    </div>
+
+    <div class="panel-hdr">Joints / Bones</div>
+    <div class="list-box" id="bone-list"></div>
+    <div class="rp-btns">
+      <button class="small-btn" onclick="addBone()">Add</button>
+      <button class="small-btn" onclick="deleteBone()">Del</button>
+    </div>
+
+    <div class="panel-hdr">Statistics</div>
+    <div class="stats-grid" id="stats-grid">
+      <div class="stat-row"><span class="stat-lbl">Verts</span><span class="stat-val" id="s-verts">0</span></div>
+      <div class="stat-row"><span class="stat-lbl">Faces</span><span class="stat-val" id="s-faces">0</span></div>
+      <div class="stat-row"><span class="stat-lbl">Tris</span><span class="stat-val" id="s-tris">0</span></div>
+      <div class="stat-row"><span class="stat-lbl">Groups</span><span class="stat-val" id="s-groups">1</span></div>
+      <div class="stat-row"><span class="stat-lbl">SelV</span><span class="stat-val" id="s-sv">0</span></div>
+      <div class="stat-row"><span class="stat-lbl">SelF</span><span class="stat-val" id="s-sf">0</span></div>
+    </div>
+
+    <div class="panel-hdr" style="margin-top:auto">Keyboard</div>
+    <div style="padding:5px 8px;font-size:9px;color:var(--text3);line-height:1.8;font-family:var(--mono)">
+      V = vertex tool<br>
+      F = face tool<br>
+      S = select<br>
+      M = move<br>
+      G = rotate<br>
+      A = select all<br>
+      D = deselect<br>
+      I = invert sel<br>
+      Del = delete<br>
+      W = wireframe<br>
+      Esc = cancel<br>
+      Ctrl+Z = undo
+    </div>
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div id="statusbar">
+  <div class="sb-item sb-tool">Tool: <span id="sb-tool-name">Select</span></div>
+  <div class="sb-item">Sel: <span id="sb-sel">0v 0f</span></div>
+  <div class="sb-item">Pos: <span id="sb-pos">0, 0, 0</span></div>
+  <div class="sb-item">Total: <span id="sb-total">0v 0f</span></div>
+  <div class="sb-item sb-hint" id="sb-hint">Click to place vertex · Click 3 verts to make face · Shift+click to multi-select</div>
+</div>
+
+<!-- MODAL -->
+<div id="modal-overlay">
+  <div class="modal">
+    <div class="modal-hdr"><span id="modal-title">Rename</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer">
+      <button class="modal-btn" onclick="closeModal()">Cancel</button>
+      <button class="modal-btn primary" id="modal-ok" onclick="modalOK()">OK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════
+let vertices = [], faces = [];
+let groups = [{ name: 'Group1', faces: [], color: '#00d4ff' }];
+let materials = [{ name: 'Material1', color: '#00d4ff', opacity: 0.9 }];
+let bones = [];
+let selVerts = new Set(), selFaces = new Set();
+let tool = 'select';
+let snapSize = 5;
+let wipFace = [];
+let groupSel = 0, matSel = 0;
+let wireframe = false, flatShading = false, showGrid3D = true;
+let history = [];
+let modalCallback = null;
+
+// ══════════════════════════════════════════
+//  UNDO
+// ══════════════════════════════════════════
+function pushHistory() {
+  history.push({
+    vertices: vertices.map(v => ({ ...v })),
+    faces: faces.map(f => f ? [...f] : null),
+    groups: groups.map(g => ({ ...g, faces: [...g.faces] }))
+  });
+  if (history.length > 30) history.shift();
+}
+function undo() {
+  if (!history.length) return;
+  const s = history.pop();
+  vertices = s.vertices; faces = s.faces; groups = s.groups;
+  selVerts.clear(); selFaces.clear(); wipFace = [];
+  renderAll();
+}
+
+// ══════════════════════════════════════════
+//  TOOL
+// ══════════════════════════════════════════
+const toolHints = {
+  select: 'Click = select · Shift+click = add · Drag = box-select · Del = delete',
+  move:   'Drag vertex to move · Moves whole selection together',
+  rotate: 'Drag selected vertices to rotate around selection center',
+  scale:  'Drag right = scale up · Drag left = scale down (selection center)',
+  vertex: 'Click = place vertex · Vertices snap to grid',
+  face:   'Click 3 vertices in order = triangle · First vertex again = close poly · Esc = cancel',
+};
+
+function setTool(t) {
+  if (wipFace.length > 0) { wipFace = []; renderAll(); }
+  tool = t;
+  document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('t-' + t)?.classList.add('active');
+  document.getElementById('sb-tool-name').textContent = t.charAt(0).toUpperCase() + t.slice(1);
+  document.getElementById('sb-hint').textContent = toolHints[t] || '';
+  ['vp-top','vp-front','vp-side'].forEach(id => {
+    document.getElementById(id).style.cursor = t === 'select' ? 'default' : 'crosshair';
+  });
+}
+
+// ══════════════════════════════════════════
+//  SNAP
+// ══════════════════════════════════════════
+function snap(v) {
+  if (!document.getElementById('snap-on').checked) return v;
+  return Math.round(v / snapSize) * snapSize;
+}
+
+// ══════════════════════════════════════════
+//  2D VIEWPORT DRAWING
+// ══════════════════════════════════════════
+const views = {
+  top:   { canvas: 'c-top',   proj: v => ({ x: v.x,  y: -v.z }), unproj: (x,y) => ({ x, y: 0,  z: -y }), ax:'X', ay:'Z' },
+  front: { canvas: 'c-front', proj: v => ({ x: v.x,  y: -v.y }), unproj: (x,y) => ({ x, y: -y, z: 0  }), ax:'X', ay:'Y' },
+  side:  { canvas: 'c-side',  proj: v => ({ x: v.z,  y: -v.y }), unproj: (x,y) => ({ x: 0, y: -y, z: x }), ax:'Z', ay:'Y' },
+};
+const vpState = {
+  top:   { pan: { x: 200, y: 200 }, zoom: 1, panning: false },
+  front: { pan: { x: 200, y: 200 }, zoom: 1, panning: false },
+  side:  { pan: { x: 200, y: 200 }, zoom: 1, panning: false },
+};
+let activeVP = 'top';
+
+function w2s(vx, vy, state) { return { x: vx * state.zoom + state.pan.x, y: vy * state.zoom + state.pan.y }; }
+function s2w(sx, sy, state) { return { x: (sx - state.pan.x) / state.zoom, y: (sy - state.pan.y) / state.zoom }; }
+
+function drawView(vpKey) {
+  const vd = views[vpKey], state = vpState[vpKey];
+  const canvas = document.getElementById(vd.canvas);
+  const el = document.getElementById('vp-' + vpKey);
+  canvas.width = el.clientWidth; canvas.height = el.clientHeight;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // Background
+  ctx.fillStyle = '#0c1018'; ctx.fillRect(0, 0, W, H);
+
+  // Grid
+  const gs = 20 * state.zoom;
+  const ox = ((state.pan.x % gs) + gs) % gs, oy = ((state.pan.y % gs) + gs) % gs;
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
+  for (let x = ox; x < W; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = oy; y < H; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  const bgs = gs * 5;
+  const box = ((state.pan.x % bgs) + bgs) % bgs, boy = ((state.pan.y % bgs) + bgs) % bgs;
+  ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.lineWidth = 1;
+  for (let x = box; x < W; x += bgs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = boy; y < H; y += bgs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // Axes
+  ctx.strokeStyle = 'rgba(0, 200, 255, 0.25)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(state.pan.x, 0); ctx.lineTo(state.pan.x, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, state.pan.y); ctx.lineTo(W, state.pan.y); ctx.stroke();
+  ctx.fillStyle = 'rgba(0, 200, 255, 0.5)'; ctx.font = '10px "Share Tech Mono"';
+  ctx.fillText(vd.ax, W - 14, state.pan.y - 3);
+  ctx.fillText(vd.ay, state.pan.x + 3, 11);
+
+  // Faces
+  faces.forEach((f, fi) => {
+    if (!f || f.length < 2) return;
+    const pts = f.map(vi => { const pj = vd.proj(vertices[vi]); return w2s(pj.x, pj.y, state); });
+    const isSel = selFaces.has(fi);
+    const gi = faceGroup(fi);
+    const col = gi >= 0 ? groups[gi].color : '#5DCAA5';
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    if (f.length >= 3) ctx.closePath();
+    ctx.fillStyle = col + (isSel ? '55' : '22'); ctx.fill();
+    ctx.strokeStyle = isSel ? '#ffaa00' : col;
+    ctx.lineWidth = isSel ? 2 : 1; ctx.stroke();
+    // Edge midpoints for selected edges
+    if (isSel && f.length >= 2) {
+      ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (f.length >= 3) ctx.closePath();
+      ctx.stroke();
+    }
+  });
+
+  // WIP face
+  if (wipFace.length > 0) {
+    wipFace.forEach((vi, i) => {
+      const pj = vd.proj(vertices[vi]);
+      const sc = w2s(pj.x, pj.y, state);
+      ctx.beginPath(); ctx.arc(sc.x, sc.y, 7, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 2; ctx.stroke();
+      if (i > 0) {
+        const pj0 = vd.proj(vertices[wipFace[i-1]]);
+        const sc0 = w2s(pj0.x, pj0.y, state);
+        ctx.beginPath(); ctx.moveTo(sc0.x, sc0.y); ctx.lineTo(sc.x, sc.y);
+        ctx.strokeStyle = 'rgba(255,102,0,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+    });
+  }
+
+  // Vertices
+  vertices.forEach((v, vi) => {
+    const pj = vd.proj(v);
+    const sc = w2s(pj.x, pj.y, state);
+    const isSel = selVerts.has(vi);
+    ctx.beginPath(); ctx.arc(sc.x, sc.y, isSel ? 5.5 : 3, 0, Math.PI * 2);
+    ctx.fillStyle = isSel ? '#ffaa00' : '#00d4ff';
+    ctx.fill();
+    ctx.strokeStyle = isSel ? '#ffcc44' : '#005566';
+    ctx.lineWidth = 1; ctx.stroke();
+  });
+
+  // Selection rect
+  if (selRect && selRectVP === vpKey) {
+    ctx.strokeStyle = '#4a8fcf'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeRect(selRect.x, selRect.y, selRect.w, selRect.h);
+    ctx.fillStyle = 'rgba(74,143,207,0.08)'; ctx.fillRect(selRect.x, selRect.y, selRect.w, selRect.h);
+    ctx.setLineDash([]);
+  }
+}
+
+let selRect = null, selRectStart = null, selRectVP = null;
+
+function faceGroup(fi) {
+  for (let gi = 0; gi < groups.length; gi++) if (groups[gi].faces.includes(fi)) return gi;
+  return -1;
+}
+
+// ══════════════════════════════════════════
+//  THREE.JS 3D VIEWPORT
+// ══════════════════════════════════════════
+const canvas3d = document.getElementById('c-3d');
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x0c1018);
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+camera.position.set(200, 180, 280); camera.lookAt(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.85); keyLight.position.set(2, 4, 3); keyLight.castShadow = true; scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x4488cc, 0.3); fillLight.position.set(-2, -1, -2); scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0xa8ff3e, 0.15); rimLight.position.set(0, 3, -4); scene.add(rimLight);
+
+const grid3d = new THREE.GridHelper(600, 30, 0x1a2a3a, 0x111d2a); scene.add(grid3d);
+scene.add(new THREE.AxesHelper(80));
+
+const meshGroup = new THREE.Group(); scene.add(meshGroup);
+const vertGroup = new THREE.Group(); scene.add(vertGroup);
+
+let orb = { t: 0.6, p: 1.1, r: 380 };
+function updateCam() {
+  camera.position.set(
+    orb.r * Math.sin(orb.p) * Math.sin(orb.t),
+    orb.r * Math.cos(orb.p),
+    orb.r * Math.sin(orb.p) * Math.cos(orb.t)
+  );
+  camera.lookAt(0, 0, 0);
+}
+updateCam();
+
+let orbiting = false, orbLast = { x: 0, y: 0 };
+const vp3d = document.getElementById('vp-3d');
+vp3d.addEventListener('mousedown', e => { if (e.button !== 2) { orbiting = true; orbLast = { x: e.clientX, y: e.clientY }; } e.stopPropagation(); });
+document.addEventListener('mousemove', e => {
+  if (!orbiting) return;
+  orb.t -= (e.clientX - orbLast.x) * 0.006;
+  orb.p = Math.max(0.08, Math.min(Math.PI - 0.08, orb.p + (e.clientY - orbLast.y) * 0.006));
+  orbLast = { x: e.clientX, y: e.clientY }; updateCam();
+});
+document.addEventListener('mouseup', () => orbiting = false);
+vp3d.addEventListener('wheel', e => { orb.r = Math.max(20, Math.min(3000, orb.r + e.deltaY * 0.5)); updateCam(); e.preventDefault(); }, { passive: false });
+vp3d.addEventListener('contextmenu', e => e.preventDefault());
+
+function rebuild3D() {
+  meshGroup.clear(); vertGroup.clear();
+
+  const buildMeshForFaces = (faceIndices, color) => {
+    const pos = [], norms = [], idxArr = [];
+    faceIndices.forEach(fi => {
+      const f = faces[fi]; if (!f || f.length < 3) return;
+      const verts = f.map(vi => vertices[vi]);
+      const v0 = new THREE.Vector3(verts[0].x, verts[0].y, verts[0].z);
+      for (let i = 1; i < verts.length - 1; i++) {
+        const v1 = new THREE.Vector3(verts[i].x, verts[i].y, verts[i].z);
+        const v2 = new THREE.Vector3(verts[i+1].x, verts[i+1].y, verts[i+1].z);
+        const base = pos.length / 3;
+        pos.push(v0.x,v0.y,v0.z, v1.x,v1.y,v1.z, v2.x,v2.y,v2.z);
+        const n = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0)).normalize();
+        norms.push(n.x,n.y,n.z, n.x,n.y,n.z, n.x,n.y,n.z);
+        idxArr.push(base, base+1, base+2);
+      }
+    });
+    if (pos.length === 0) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
+    geo.setIndex(idxArr);
+    if (flatShading) geo.computeVertexNormals();
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(color), side: THREE.DoubleSide,
+      wireframe: wireframe, transparent: true, opacity: wireframe ? 1 : 0.9,
+      shininess: 50, flatShading: flatShading
+    });
+    meshGroup.add(new THREE.Mesh(geo, mat));
+    if (!wireframe) {
+      const edges = new THREE.EdgesGeometry(geo, 15);
+      const lmat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), opacity: 0.35, transparent: true });
+      meshGroup.add(new THREE.LineSegments(edges, lmat));
+    }
+    // Selected face highlight
+    const selF = faceIndices.filter(fi => selFaces.has(fi));
+    if (selF.length > 0) buildMeshForFaces_highlight(selF);
+  };
+
+  const buildMeshForFaces_highlight = (faceIndices) => {
+    const pos = [];
+    faceIndices.forEach(fi => {
+      const f = faces[fi]; if (!f || f.length < 3) return;
+      const verts = f.map(vi => vertices[vi]);
+      const v0 = new THREE.Vector3(verts[0].x, verts[0].y, verts[0].z);
+      for (let i = 1; i < verts.length - 1; i++) {
+        const v1 = new THREE.Vector3(verts[i].x, verts[i].y, verts[i].z);
+        const v2 = new THREE.Vector3(verts[i+1].x, verts[i+1].y, verts[i+1].z);
+        pos.push(v0.x,v0.y,v0.z, v1.x,v1.y,v1.z, v2.x,v2.y,v2.z);
+      }
+    });
+    if (!pos.length) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    meshGroup.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.35, side: THREE.DoubleSide })));
+  };
+
+  groups.forEach(g => {
+    if (g.faces.length > 0) buildMeshForFaces(g.faces, g.color);
+  });
+  const assigned = new Set(groups.flatMap(g => g.faces));
+  const unassigned = faces.map((f,fi) => fi).filter(fi => !assigned.has(fi) && faces[fi] && faces[fi].length >= 3);
+  if (unassigned.length > 0) buildMeshForFaces(unassigned, '#888888');
+
+  // Vertex spheres
+  vertices.forEach((v, vi) => {
+    const isSel = selVerts.has(vi);
+    const geo = new THREE.SphereGeometry(isSel ? 3.5 : 2, 6, 6);
+    const mat = new THREE.MeshBasicMaterial({ color: isSel ? 0xffaa00 : 0x00d4ff });
+    const m = new THREE.Mesh(geo, mat); m.position.set(v.x, v.y, v.z);
+    vertGroup.add(m);
+  });
+}
+
+// ══════════════════════════════════════════
+//  RENDER ALL
+// ══════════════════════════════════════════
+function renderAll() {
+  rebuild3D();
+  ['top','front','side'].forEach(k => drawView(k));
+  updateStats(); updateLists();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const el = document.getElementById('vp-3d');
+  const w = el.clientWidth, h = el.clientHeight;
+  if (w && h) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  renderer.render(scene, camera);
+}
+
+// ══════════════════════════════════════════
+//  VIEWPORT INTERACTION
+// ══════════════════════════════════════════
+function vpClick(vpKey, e, sx, sy) {
+  const state = vpState[vpKey], vd = views[vpKey];
+  const wc = s2w(sx, sy, state);
+  const wx = snap(wc.x), wy = snap(wc.y);
+  const wp3 = vd.unproj(wx, wy);
+
+  if (tool === 'vertex') {
+    pushHistory();
+    const existing = nearestVert(sx, sy, vpKey);
+    if (existing < 0) { vertices.push({ x: wp3.x, y: wp3.y, z: wp3.z }); renderAll(); }
+  } else if (tool === 'face') {
+    const vi = nearestVert(sx, sy, vpKey);
+    if (vi >= 0) {
+      if (wipFace.length >= 3 && wipFace[0] === vi) {
+        pushHistory();
+        const fi = faces.length; faces.push([...wipFace]);
+        groups[groupSel].faces.push(fi); wipFace = []; renderAll();
+      } else if (!wipFace.includes(vi)) {
+        wipFace.push(vi); renderAll();
+        if (wipFace.length === 3) {
+          pushHistory();
+          const fi = faces.length; faces.push([...wipFace]);
+          groups[groupSel].faces.push(fi); wipFace = []; renderAll();
+        }
+      }
+    }
+  } else if (tool === 'select') {
+    const vi = nearestVert(sx, sy, vpKey);
+    if (vi >= 0) {
+      if (e.shiftKey) selVerts.has(vi) ? selVerts.delete(vi) : selVerts.add(vi);
+      else { selVerts.clear(); selFaces.clear(); selVerts.add(vi); }
+    } else {
+      const fi = nearestFace(sx, sy, vpKey);
+      if (fi >= 0) {
+        if (e.shiftKey) selFaces.has(fi) ? selFaces.delete(fi) : selFaces.add(fi);
+        else { selVerts.clear(); selFaces.clear(); selFaces.add(fi); }
+      } else if (!e.shiftKey) { selVerts.clear(); selFaces.clear(); }
+    }
+    updateTransformUI(); renderAll();
+  }
+  updateSB();
+}
+
+function nearestVert(sx, sy, vpKey) {
+  const state = vpState[vpKey], vd = views[vpKey];
+  for (let i = vertices.length - 1; i >= 0; i--) {
+    const pj = vd.proj(vertices[i]);
+    const sc = w2s(pj.x, pj.y, state);
+    if (Math.hypot(sc.x - sx, sc.y - sy) < 9) return i;
+  }
+  return -1;
+}
+
+function nearestFace(sx, sy, vpKey) {
+  const state = vpState[vpKey], vd = views[vpKey];
+  for (let fi = faces.length - 1; fi >= 0; fi--) {
+    const f = faces[fi]; if (!f || f.length < 3) continue;
+    const pts = f.map(vi => { const pj = vd.proj(vertices[vi]); return w2s(pj.x, pj.y, state); });
+    if (pointInPoly(sx, sy, pts)) return fi;
+  }
+  return -1;
+}
+
+function pointInPoly(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Setup per 2D viewport
+function setupVP(vpKey) {
+  const el = document.getElementById('vp-' + vpKey);
+  const state = vpState[vpKey];
+  let mouseDown = false, mouseDownPos = null, isDragging = false;
+  let dragVertBase = null, dragOrigVerts = [];
+
+  el.addEventListener('contextmenu', e => e.preventDefault());
+
+  el.addEventListener('mousedown', e => {
+    mouseDown = true; isDragging = false;
+    const r = el.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    mouseDownPos = { x: sx, y: sy };
+
+    document.querySelectorAll('.vp').forEach(v => v.classList.remove('vp-active'));
+    el.classList.add('vp-active'); activeVP = vpKey;
+
+    if (e.button === 2 || e.button === 1) { state.panning = true; state.panStart = { x: e.clientX - state.pan.x, y: e.clientY - state.pan.y }; return; }
+
+    if (tool === 'move' || (tool === 'select' && selVerts.size > 0)) {
+      const vi = nearestVert(sx, sy, vpKey);
+      if (vi >= 0 && (tool === 'move' || selVerts.has(vi))) {
+        isDragging = true;
+        dragVertBase = { vi, vpKey };
+        dragOrigVerts = vertices.map(v => ({ ...v }));
+        if (tool === 'select' && !selVerts.has(vi) && !e.shiftKey) { selVerts.clear(); selVerts.add(vi); }
+      } else if (tool === 'select') {
+        selRectStart = { x: sx, y: sy }; selRect = { x: sx, y: sy, w: 0, h: 0 }; selRectVP = vpKey;
+      }
+    } else if (tool === 'select') {
+      selRectStart = { x: sx, y: sy }; selRect = { x: sx, y: sy, w: 0, h: 0 }; selRectVP = vpKey;
+    } else if (tool === 'rotate' || tool === 'scale') {
+      if (selVerts.size > 0) {
+        isDragging = true;
+        dragVertBase = { startX: sx, startY: sy, vpKey };
+        dragOrigVerts = vertices.map(v => ({ ...v }));
+      }
+    }
+  });
+
+  el.addEventListener('mousemove', e => {
+    const r = el.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const wc = s2w(sx, sy, state);
+    document.getElementById('sb-pos').textContent = snap(wc.x) + ', ' + snap(-wc.y) + ', 0';
+
+    if (state.panning) { state.pan.x = e.clientX - state.panStart.x; state.pan.y = e.clientY - state.panStart.y; renderAll(); return; }
+
+    if (isDragging && mouseDown) {
+      if (tool === 'move' && dragVertBase) {
+        const vd = views[vpKey], wco = s2w(sx, sy, state);
+        const wx = snap(wco.x), wy = snap(wco.y);
+        const wp3 = vd.unproj(wx, wy);
+        const orig = dragOrigVerts[dragVertBase.vi];
+        const origPj = vd.proj(orig);
+        const dx = wp3.x - origPj.x, dy = wp3.y - origPj.y, dz = wp3.z - origPj.z;
+        // Actually compute delta from drag origin
+        const origW = s2w(mouseDownPos.x, mouseDownPos.y, state);
+        const curW = s2w(sx, sy, state);
+        const deltaProjX = curW.x - origW.x, deltaProjY = curW.y - origW.y;
+        const deltaWorld = vd.unproj(deltaProjX, deltaProjY);
+        selVerts.forEach(vi => {
+          vertices[vi].x = dragOrigVerts[vi].x + deltaWorld.x;
+          vertices[vi].y = dragOrigVerts[vi].y + deltaWorld.y;
+          vertices[vi].z = dragOrigVerts[vi].z + deltaWorld.z;
+        });
+        renderAll();
+      } else if (tool === 'rotate' && dragVertBase) {
+        const dx = sx - dragVertBase.startX;
+        const angle = dx * 0.01;
+        const cx = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.x, 0) / selVerts.size;
+        const cy = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.y, 0) / selVerts.size;
+        const cz = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.z, 0) / selVerts.size;
+        selVerts.forEach(vi => {
+          const v = dragOrigVerts[vi];
+          const rx = v.x - cx, rz = v.z - cz;
+          vertices[vi].x = cx + rx * Math.cos(angle) - rz * Math.sin(angle);
+          vertices[vi].z = cz + rx * Math.sin(angle) + rz * Math.cos(angle);
+          vertices[vi].y = v.y;
+        });
+        renderAll();
+      } else if (tool === 'scale' && dragVertBase) {
+        const dx = sx - dragVertBase.startX;
+        const factor = 1 + dx * 0.005;
+        const cx = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.x, 0) / selVerts.size;
+        const cy = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.y, 0) / selVerts.size;
+        const cz = dragOrigVerts.filter((v,i) => selVerts.has(i)).reduce((s,v) => s+v.z, 0) / selVerts.size;
+        selVerts.forEach(vi => {
+          vertices[vi].x = cx + (dragOrigVerts[vi].x - cx) * factor;
+          vertices[vi].y = cy + (dragOrigVerts[vi].y - cy) * factor;
+          vertices[vi].z = cz + (dragOrigVerts[vi].z - cz) * factor;
+        });
+        renderAll();
+      }
+    }
+
+    if (selRect && selRectVP === vpKey && mouseDown) {
+      selRect = { x: Math.min(sx, selRectStart.x), y: Math.min(sy, selRectStart.y), w: Math.abs(sx - selRectStart.x), h: Math.abs(sy - selRectStart.y) };
+      drawView(vpKey);
+    }
+  });
+
+  el.addEventListener('mouseup', e => {
+    const r = el.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    if (state.panning) { state.panning = false; return; }
+    if (!isDragging && mouseDownPos && Math.hypot(sx - mouseDownPos.x, sy - mouseDownPos.y) < 5) vpClick(vpKey, e, sx, sy);
+    if (selRect && selRectVP === vpKey) {
+      const sr = selRect;
+      if (!e.shiftKey && tool === 'select') { selVerts.clear(); selFaces.clear(); }
+      vertices.forEach((v, vi) => {
+        const pj = views[vpKey].proj(v);
+        const sc = w2s(pj.x, pj.y, state);
+        if (sc.x >= sr.x && sc.x <= sr.x + sr.w && sc.y >= sr.y && sc.y <= sr.y + sr.h) selVerts.add(vi);
+      });
+      selRect = null; selRectStart = null; selRectVP = null; renderAll();
+    }
+    isDragging = false; mouseDown = false;
+    updateSB();
+  });
+
+  el.addEventListener('wheel', e => {
+    const r = el.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const before = s2w(sx, sy, state);
+    const f = e.deltaY > 0 ? 0.85 : 1 / 0.85;
+    state.zoom = Math.max(0.04, Math.min(40, state.zoom * f));
+    const after = s2w(sx, sy, state);
+    state.pan.x += (after.x - before.x) * state.zoom;
+    state.pan.y += (after.y - before.y) * state.zoom;
+    renderAll(); e.preventDefault();
+  }, { passive: false });
+
+  el.addEventListener('mouseleave', () => { state.panning = false; });
+}
+
+// ══════════════════════════════════════════
+//  PRIMITIVES
+// ══════════════════════════════════════════
+function addPrimitive(type) {
+  pushHistory();
+  const o = vertices.length;
+  if (type === 'box') {
+    const s = 30;
+    [[-s,-s,-s],[s,-s,-s],[s,s,-s],[-s,s,-s],[-s,-s,s],[s,-s,s],[s,s,s],[-s,s,s]].forEach(([x,y,z]) => vertices.push({x,y,z}));
+    [[0,1,2,3],[4,7,6,5],[0,4,5,1],[2,6,7,3],[0,3,7,4],[1,5,6,2]].forEach(f => { groups[groupSel].faces.push(faces.length); faces.push(f.map(i=>i+o)); });
+  } else if (type === 'sphere') {
+    const segs=10, rings=8, r=30;
+    for (let ri=0;ri<=rings;ri++) for (let si=0;si<segs;si++) {
+      const phi=Math.PI*ri/rings, theta=2*Math.PI*si/segs;
+      vertices.push({x:r*Math.sin(phi)*Math.cos(theta),y:r*Math.cos(phi),z:r*Math.sin(phi)*Math.sin(theta)});
+    }
+    for (let ri=0;ri<rings;ri++) for (let si=0;si<segs;si++) {
+      const a=o+ri*segs+si,b=o+ri*segs+(si+1)%segs,c=o+(ri+1)*segs+(si+1)%segs,d=o+(ri+1)*segs+si;
+      groups[groupSel].faces.push(faces.length); faces.push([a,b,c,d]);
+    }
+  } else if (type === 'cylinder') {
+    const segs=10, r=25, h=50;
+    for (let i=0;i<segs;i++){const a=2*Math.PI*i/segs;vertices.push({x:r*Math.cos(a),y:-h/2,z:r*Math.sin(a)});}
+    for (let i=0;i<segs;i++){const a=2*Math.PI*i/segs;vertices.push({x:r*Math.cos(a),y:h/2,z:r*Math.sin(a)});}
+    for (let i=0;i<segs;i++){groups[groupSel].faces.push(faces.length);faces.push([o+i,o+(i+1)%segs,o+segs+(i+1)%segs,o+segs+i]);}
+    const bot=[],top=[];for(let i=0;i<segs;i++){bot.push(o+i);top.push(o+segs+i);}
+    groups[groupSel].faces.push(faces.length);faces.push(bot);
+    groups[groupSel].faces.push(faces.length);faces.push([...top].reverse());
+  } else if (type === 'cone') {
+    const segs=10, r=25, h=60;
+    for (let i=0;i<segs;i++){const a=2*Math.PI*i/segs;vertices.push({x:r*Math.cos(a),y:0,z:r*Math.sin(a)});}
+    vertices.push({x:0,y:h,z:0}); // apex
+    const apex=o+segs;
+    for (let i=0;i<segs;i++){groups[groupSel].faces.push(faces.length);faces.push([o+i,o+(i+1)%segs,apex]);}
+    const bot=[];for(let i=0;i<segs;i++)bot.push(o+i);
+    groups[groupSel].faces.push(faces.length);faces.push(bot);
+  } else if (type === 'plane') {
+    const s=50, div=6;
+    for (let y=0;y<=div;y++) for (let x=0;x<=div;x++) vertices.push({x:(x/div-0.5)*s*2,y:0,z:(y/div-0.5)*s*2});
+    for (let y=0;y<div;y++) for (let x=0;x<div;x++) {
+      groups[groupSel].faces.push(faces.length);
+      faces.push([o+y*(div+1)+x, o+y*(div+1)+x+1, o+(y+1)*(div+1)+x+1, o+(y+1)*(div+1)+x]);
+    }
+  } else if (type === 'torus') {
+    const R=35, r2=10, segs=14, rings=10;
+    for (let ri=0;ri<rings;ri++) for (let si=0;si<segs;si++) {
+      const theta=2*Math.PI*ri/rings, phi=2*Math.PI*si/segs;
+      vertices.push({x:(R+r2*Math.cos(phi))*Math.cos(theta),y:r2*Math.sin(phi),z:(R+r2*Math.cos(phi))*Math.sin(theta)});
+    }
+    for (let ri=0;ri<rings;ri++) for (let si=0;si<segs;si++) {
+      const a=o+ri*segs+si, b=o+ri*segs+(si+1)%segs, c=o+((ri+1)%rings)*segs+(si+1)%segs, d=o+((ri+1)%rings)*segs+si;
+      groups[groupSel].faces.push(faces.length); faces.push([a,b,c,d]);
+    }
+  }
+  renderAll();
+}
+
+// ══════════════════════════════════════════
+//  MESH OPS
+// ══════════════════════════════════════════
+function deleteSelected() {
+  pushHistory();
+  const toRemoveFaces = new Set(selFaces);
+  selFaces.forEach(fi => { faces[fi] = null; groups.forEach(g => { g.faces = g.faces.filter(f => f !== fi); }); });
+  // Remap face indices in groups after nulls
+  const remapped = faces.map((f,fi) => f);
+  const newFaces = []; const remapIdx = {};
+  remapped.forEach((f, fi) => { if (f !== null) { remapIdx[fi] = newFaces.length; newFaces.push(f); } });
+  faces = newFaces;
+  groups.forEach(g => { g.faces = g.faces.map(fi => remapIdx[fi]).filter(fi => fi !== undefined); });
+
+  if (selVerts.size > 0) {
+    const toRemove = [...selVerts].sort((a,b) => b - a);
+    toRemove.forEach(vi => {
+      vertices.splice(vi, 1);
+      faces = faces.map(f => f ? f.map(fvi => fvi > vi ? fvi - 1 : fvi) : null).filter(f => f && f.length >= 2);
+    });
+    groups.forEach(g => { g.faces = g.faces.filter(fi => fi < faces.length); });
+  }
+  selVerts.clear(); selFaces.clear(); renderAll();
+}
+
+function selectAll() { vertices.forEach((_,i) => selVerts.add(i)); faces.forEach((_,i) => selFaces.add(i)); renderAll(); }
+function deselectAll() { selVerts.clear(); selFaces.clear(); wipFace = []; renderAll(); }
+function invertSelection() {
+  const newV = new Set(vertices.map((_,i)=>i).filter(i=>!selVerts.has(i)));
+  const newF = new Set(faces.map((_,i)=>i).filter(i=>!selFaces.has(i)));
+  selVerts = newV; selFaces = newF; renderAll();
+}
+
+function weldVerts(thresh) {
+  thresh = thresh || 4;
+  pushHistory();
+  const remap = new Array(vertices.length).fill(-1);
+  const newV = [];
+  vertices.forEach((v,i) => {
+    let found = -1;
+    for (let j = 0; j < newV.length; j++) if (Math.hypot(v.x-newV[j].x,v.y-newV[j].y,v.z-newV[j].z) < thresh) { found = j; break; }
+    if (found < 0) { remap[i] = newV.length; newV.push(v); } else remap[i] = found;
+  });
+  vertices = newV;
+  faces = faces.map(f => f ? [...new Set(f.map(vi => remap[vi]))].filter(vi => vi >= 0) : null).filter(f => f && f.length >= 2);
+  renderAll();
+}
+function weldAll() { weldVerts(5); }
+
+function snapToGrid() {
+  pushHistory();
+  selVerts.forEach(vi => { vertices[vi].x = snap(vertices[vi].x); vertices[vi].y = snap(vertices[vi].y); vertices[vi].z = snap(vertices[vi].z); });
+  renderAll();
+}
+
+function averageVerts() {
+  if (selVerts.size < 2) return;
+  pushHistory();
+  const arr = [...selVerts].map(i => vertices[i]);
+  const cx = arr.reduce((s,v)=>s+v.x,0)/arr.length;
+  const cy = arr.reduce((s,v)=>s+v.y,0)/arr.length;
+  const cz = arr.reduce((s,v)=>s+v.z,0)/arr.length;
+  selVerts.forEach(vi => { vertices[vi].x=cx; vertices[vi].y=cy; vertices[vi].z=cz; });
+  renderAll();
+}
+
+function flipNormals() {
+  pushHistory();
+  const target = selFaces.size > 0 ? selFaces : new Set(faces.map((_,i)=>i));
+  target.forEach(fi => { if (faces[fi]) faces[fi] = [...faces[fi]].reverse(); });
+  renderAll();
+}
+
+function subdivide() {
+  pushHistory();
+  const edgeMap = {};
+  function midVert(a, b) {
+    const key = Math.min(a,b)+','+Math.max(a,b);
+    if (edgeMap[key] !== undefined) return edgeMap[key];
+    const va = vertices[a], vb = vertices[b], idx = vertices.length;
+    vertices.push({ x:(va.x+vb.x)/2, y:(va.y+vb.y)/2, z:(va.z+vb.z)/2 });
+    edgeMap[key] = idx; return idx;
+  }
+  const target = selFaces.size > 0 ? [...selFaces] : faces.map((_,i)=>i);
+  const newFaces = []; const removedFaces = new Set();
+  target.forEach(fi => {
+    const f = faces[fi]; if (!f || f.length < 3) return;
+    removedFaces.add(fi);
+    if (f.length === 3) {
+      const m01=midVert(f[0],f[1]),m12=midVert(f[1],f[2]),m20=midVert(f[2],f[0]);
+      newFaces.push([f[0],m01,m20],[m01,f[1],m12],[m20,m12,f[2]],[m01,m12,m20]);
+    } else if (f.length === 4) {
+      const m01=midVert(f[0],f[1]),m12=midVert(f[1],f[2]),m23=midVert(f[2],f[3]),m30=midVert(f[3],f[0]);
+      const ci=vertices.length; vertices.push({x:(vertices[f[0]].x+vertices[f[1]].x+vertices[f[2]].x+vertices[f[3]].x)/4,y:(vertices[f[0]].y+vertices[f[1]].y+vertices[f[2]].y+vertices[f[3]].y)/4,z:(vertices[f[0]].z+vertices[f[1]].z+vertices[f[2]].z+vertices[f[3]].z)/4});
+      newFaces.push([f[0],m01,ci,m30],[m01,f[1],m12,ci],[ci,m12,f[2],m23],[m30,ci,m23,f[3]]);
+    }
+  });
+  const remapFI = {};
+  const cleanFaces = [];
+  faces.forEach((f,fi) => { if (!removedFaces.has(fi) && f) { remapFI[fi]=cleanFaces.length; cleanFaces.push(f); } });
+  groups.forEach(g => { g.faces = g.faces.map(fi => remapFI[fi]).filter(fi => fi !== undefined); });
+  newFaces.forEach(f => { groups[groupSel].faces.push(cleanFaces.length); cleanFaces.push(f); });
+  faces = cleanFaces; selFaces.clear(); renderAll();
+}
+
+function triangulateFaces() {
+  pushHistory();
+  const target = selFaces.size > 0 ? [...selFaces] : faces.map((_,i)=>i);
+  const newFaces = []; const removeSet = new Set();
+  target.forEach(fi => {
+    const f = faces[fi]; if (!f || f.length <= 3) return;
+    removeSet.add(fi);
+    for (let i = 1; i < f.length - 1; i++) newFaces.push([f[0], f[i], f[i+1]]);
+  });
+  const remapFI = {};
+  const cleanFaces = [];
+  faces.forEach((f,fi) => { if (!removeSet.has(fi) && f) { remapFI[fi]=cleanFaces.length; cleanFaces.push(f); } });
+  groups.forEach(g => { g.faces = g.faces.map(fi => remapFI[fi]).filter(fi => fi !== undefined); });
+  newFaces.forEach(f => { groups[groupSel].faces.push(cleanFaces.length); cleanFaces.push(f); });
+  faces = cleanFaces; renderAll();
+}
+
+function extrudeFaces() {
+  if (selFaces.size === 0) return;
+  pushHistory();
+  selFaces.forEach(fi => {
+    const f = faces[fi]; if (!f || f.length < 3) return;
+    const verts = f.map(vi => vertices[vi]);
+    const v0 = new THREE.Vector3(verts[0].x,verts[0].y,verts[0].z);
+    let n = new THREE.Vector3();
+    for (let i=1;i<verts.length-1;i++) {
+      const v1 = new THREE.Vector3(verts[i].x,verts[i].y,verts[i].z);
+      const v2 = new THREE.Vector3(verts[i+1].x,verts[i+1].y,verts[i+1].z);
+      n.add(new THREE.Vector3().crossVectors(v1.clone().sub(v0),v2.clone().sub(v0)));
+    }
+    n.normalize().multiplyScalar(20);
+    const newVI = vertices.length;
+    f.forEach(vi => vertices.push({x:vertices[vi].x+n.x,y:vertices[vi].y+n.y,z:vertices[vi].z+n.z}));
+    for (let i=0;i<f.length;i++) { groups[groupSel].faces.push(faces.length); faces.push([f[i],f[(i+1)%f.length],newVI+(i+1)%f.length,newVI+i]); }
+    const newTopFace = f.map((_,i)=>newVI+i);
+    faces[fi] = newTopFace;
+  });
+  renderAll();
+}
+
+function smoothMesh() {
+  pushHistory();
+  const target = selVerts.size > 0 ? selVerts : new Set(vertices.map((_,i)=>i));
+  const adjMap = {};
+  vertices.forEach((_,i) => adjMap[i] = []);
+  faces.forEach(f => { if (!f) return; f.forEach((vi,i) => { const ni = f[(i+1)%f.length]; adjMap[vi].push(ni); adjMap[ni].push(vi); }); });
+  const newVerts = vertices.map(v => ({...v}));
+  target.forEach(vi => {
+    const adj = adjMap[vi]; if (!adj.length) return;
+    const cx = adj.reduce((s,ai)=>s+vertices[ai].x,0)/adj.length;
+    const cy = adj.reduce((s,ai)=>s+vertices[ai].y,0)/adj.length;
+    const cz = adj.reduce((s,ai)=>s+vertices[ai].z,0)/adj.length;
+    newVerts[vi] = { x:(vertices[vi].x+cx)/2, y:(vertices[vi].y+cy)/2, z:(vertices[vi].z+cz)/2 };
+  });
+  vertices = newVerts; renderAll();
+}
+
+// ══════════════════════════════════════════
+//  TRANSFORM PANEL
+// ══════════════════════════════════════════
+function updateTransformUI() {
+  if (selVerts.size > 0) {
+    const arr = [...selVerts].map(i => vertices[i]);
+    document.getElementById('tx').value = Math.round(arr.reduce((s,v)=>s+v.x,0)/arr.length);
+    document.getElementById('ty').value = Math.round(arr.reduce((s,v)=>s+v.y,0)/arr.length);
+    document.getElementById('tz').value = Math.round(arr.reduce((s,v)=>s+v.z,0)/arr.length);
+  }
+}
+function applyMove() {
+  const dx=parseFloat(document.getElementById('tx').value)||0;
+  const dy=parseFloat(document.getElementById('ty').value)||0;
+  const dz=parseFloat(document.getElementById('tz').value)||0;
+  pushHistory();
+  const tgt = selVerts.size>0 ? selVerts : new Set(vertices.map((_,i)=>i));
+  tgt.forEach(vi=>{vertices[vi].x+=dx;vertices[vi].y+=dy;vertices[vi].z+=dz;}); renderAll();
+}
+function applyRotate() {
+  const rx=parseFloat(document.getElementById('tx').value)*Math.PI/180;
+  const ry=parseFloat(document.getElementById('ty').value)*Math.PI/180;
+  const rz=parseFloat(document.getElementById('tz').value)*Math.PI/180;
+  pushHistory();
+  const tgt = selVerts.size>0 ? [...selVerts] : vertices.map((_,i)=>i);
+  tgt.forEach(vi => {
+    let {x,y,z} = vertices[vi];
+    let ny=y*Math.cos(rx)-z*Math.sin(rx),nz=y*Math.sin(rx)+z*Math.cos(rx);y=ny;z=nz;
+    let nx=x*Math.cos(ry)+z*Math.sin(ry);nz=-x*Math.sin(ry)+z*Math.cos(ry);x=nx;z=nz;
+    nx=x*Math.cos(rz)-y*Math.sin(rz);ny=x*Math.sin(rz)+y*Math.cos(rz);
+    vertices[vi]={x:nx,y:ny,z};
+  });
+  renderAll();
+}
+function applyScale() {
+  const sx=parseFloat(document.getElementById('tx').value)||1;
+  const sy=parseFloat(document.getElementById('ty').value)||1;
+  const sz=parseFloat(document.getElementById('tz').value)||1;
+  pushHistory();
+  const tgt = selVerts.size>0 ? [...selVerts] : vertices.map((_,i)=>i);
+  tgt.forEach(vi=>{vertices[vi].x*=sx;vertices[vi].y*=sy;vertices[vi].z*=sz;}); renderAll();
+}
+
+// ══════════════════════════════════════════
+//  VIEW OPS
+// ══════════════════════════════════════════
+function toggleWireframe() {
+  wireframe = !wireframe;
+  document.getElementById('btn-wire').classList.toggle('active', wireframe);
+  renderAll();
+}
+function toggleFlat() { flatShading = !flatShading; document.getElementById('btn-flat').classList.toggle('active', flatShading); renderAll(); }
+function toggleGrid3D() { showGrid3D = !showGrid3D; grid3d.visible = showGrid3D; }
+function resetViews() {
+  Object.keys(vpState).forEach(k => { vpState[k].pan = {x:200,y:200}; vpState[k].zoom = 1; });
+  orb = {t:0.6,p:1.1,r:380}; updateCam(); renderAll();
+}
+function frameAll() {
+  if (vertices.length === 0) return;
+  const cx=vertices.reduce((s,v)=>s+v.x,0)/vertices.length;
+  const cy=vertices.reduce((s,v)=>s+v.y,0)/vertices.length;
+  const cz=vertices.reduce((s,v)=>s+v.z,0)/vertices.length;
+  const maxD=vertices.reduce((m,v)=>Math.max(m,Math.hypot(v.x-cx,v.y-cy,v.z-cz)),0)||50;
+  Object.keys(vpState).forEach(k => {
+    const el = document.getElementById('vp-'+k);
+    vpState[k].zoom = Math.min(el.clientWidth, el.clientHeight) / (maxD * 3);
+    vpState[k].pan = { x: el.clientWidth/2, y: el.clientHeight/2 };
+  });
+  orb.r = maxD * 4; updateCam(); renderAll();
+}
+
+// ══════════════════════════════════════════
+//  GROUPS / MATERIALS / BONES
+// ══════════════════════════════════════════
+const gCols = ['#00d4ff','#a8ff3e','#ff6b35','#7f77dd','#ff3e88','#EF9F27','#5DCAA5'];
+
+function addGroup() {
+  groups.push({ name: 'Group' + (groups.length+1), faces: [], color: gCols[groups.length % gCols.length] });
+  groupSel = groups.length - 1; updateLists(); renderAll();
+}
+function renameGroup() {
+  showModal('Rename Group', `<div class="modal-row"><span class="modal-lbl">Name</span><input class="modal-input" id="mi-name" value="${groups[groupSel].name}"></div>`, () => {
+    groups[groupSel].name = document.getElementById('mi-name').value || groups[groupSel].name; updateLists();
+  });
+}
+function assignGroup() { selFaces.forEach(fi => { groups.forEach(g => { g.faces=g.faces.filter(f=>f!==fi); }); groups[groupSel].faces.push(fi); }); renderAll(); }
+function deleteGroup() { if (groups.length <= 1) return; groups.splice(groupSel,1); groupSel=0; renderAll(); }
+
+function addMaterial() {
+  materials.push({ name: 'Mat' + (materials.length+1), color: gCols[materials.length%gCols.length], opacity: 0.9 });
+  matSel = materials.length - 1; updateLists();
+}
+function editMaterial() {
+  const m = materials[matSel];
+  showModal('Edit Material', `
+    <div class="modal-row"><span class="modal-lbl">Name</span><input class="modal-input" id="mi-mname" value="${m.name}"></div>
+    <div class="modal-row"><span class="modal-lbl">Color</span><input type="color" id="mi-mcol" value="${m.color}" style="width:50px;height:24px;border:none;background:none;cursor:pointer"></div>
+  `, () => {
+    materials[matSel].name = document.getElementById('mi-mname').value;
+    materials[matSel].color = document.getElementById('mi-mcol').value;
+    updateLists();
+  });
+}
+function assignMaterial() {
+  if (selFaces.size === 0) return;
+  const col = materials[matSel].color;
+  const gi = groupSel;
+  groups[gi].color = col;
+  renderAll();
+}
+function addBone() { bones.push({ name: 'Bone'+(bones.length+1), pos:{x:0,y:0,z:0} }); updateLists(); }
+function deleteBone() { if (bones.length) { bones.pop(); updateLists(); } }
+
+// ══════════════════════════════════════════
+//  LISTS + STATS
+// ══════════════════════════════════════════
+function updateLists() {
+  document.getElementById('group-list').innerHTML = groups.map((g,i) =>
+    `<div class="list-item${i===groupSel?' sel':''}" onclick="groupSel=${i};updateLists()" style="border-left:3px solid ${g.color}">${g.name} <span style="color:${g.color};font-size:10px">(${g.faces.length}f)</span></div>`
+  ).join('');
+  document.getElementById('mat-list').innerHTML = materials.map((m,i) =>
+    `<div class="list-item${i===matSel?' sel':''}" onclick="matSel=${i};updateLists()" style="border-left:3px solid ${m.color}">${m.name}</div>`
+  ).join('');
+  document.getElementById('bone-list').innerHTML = bones.map(b =>
+    `<div class="list-item">${b.name}</div>`
+  ).join('');
+}
+
+function updateStats() {
+  const tris = faces.reduce((s,f) => s + (f ? Math.max(0, f.length-2) : 0), 0);
+  document.getElementById('s-verts').textContent = vertices.length;
+  document.getElementById('s-faces').textContent = faces.filter(f=>f&&f.length>=3).length;
+  document.getElementById('s-tris').textContent = tris;
+  document.getElementById('s-groups').textContent = groups.length;
+  document.getElementById('s-sv').textContent = selVerts.size;
+  document.getElementById('s-sf').textContent = selFaces.size;
+  document.getElementById('sb-total').textContent = vertices.length+'v '+faces.filter(f=>f&&f.length>=3).length+'f';
+  document.getElementById('sb-sel').textContent = selVerts.size+'v '+selFaces.size+'f';
+}
+function updateSB() { updateStats(); }
+
+// ══════════════════════════════════════════
+//  EXPORT
+// ══════════════════════════════════════════
+function exportOBJ() {
+  let obj = '# MeshMaker 3D - OBJ Export\n# Blender/Unity/Unreal compatible\n\n';
+  vertices.forEach(v => obj += `v ${v.x.toFixed(5)} ${v.y.toFixed(5)} ${v.z.toFixed(5)}\n`);
+  obj += '\n';
+  const fn = faces.map(f => {
+    if (!f || f.length < 3) return { x:0, y:1, z:0 };
+    const v0=vertices[f[0]],v1=vertices[f[1]],v2=vertices[f[2]];
+    const ux=v1.x-v0.x,uy=v1.y-v0.y,uz=v1.z-v0.z,vx=v2.x-v0.x,vy=v2.y-v0.y,vz=v2.z-v0.z;
+    const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx,len=Math.hypot(nx,ny,nz)||1;
+    return { x:nx/len, y:ny/len, z:nz/len };
+  });
+  fn.forEach(n => obj += `vn ${n.x.toFixed(5)} ${n.y.toFixed(5)} ${n.z.toFixed(5)}\n`);
+  obj += '\n';
+  groups.forEach(g => {
+    if (!g.faces.length) return;
+    obj += `g ${g.name}\n`;
+    g.faces.forEach(fi => {
+      const f = faces[fi]; if (!f || f.length < 3) return;
+      if (f.length === 3) obj += `f ${f[0]+1}//${fi+1} ${f[1]+1}//${fi+1} ${f[2]+1}//${fi+1}\n`;
+      else for (let i=1;i<f.length-1;i++) obj += `f ${f[0]+1}//${fi+1} ${f[i]+1}//${fi+1} ${f[i+1]+1}//${fi+1}\n`;
+    });
+    obj += '\n';
+  });
+  const assigned = new Set(groups.flatMap(g=>g.faces));
+  const unassigned = faces.map((_,fi)=>fi).filter(fi=>!assigned.has(fi)&&faces[fi]&&faces[fi].length>=3);
+  if (unassigned.length) {
+    obj += 'g default\n';
+    unassigned.forEach(fi => {
+      const f = faces[fi];
+      if (f.length===3) obj += `f ${f[0]+1}//${fi+1} ${f[1]+1}//${fi+1} ${f[2]+1}//${fi+1}\n`;
+      else for (let i=1;i<f.length-1;i++) obj += `f ${f[0]+1}//${fi+1} ${f[i]+1}//${fi+1} ${f[i+1]+1}//${fi+1}\n`;
+    });
+  }
+  const blob = new Blob([obj], { type: 'text/plain' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'model.obj'; a.click();
+}
+
+function exportSTL() {
+  let stl = 'solid meshmaker\n';
+  faces.forEach(f => {
+    if (!f || f.length < 3) return;
+    const v0=vertices[f[0]],v1=vertices[f[1]],v2=vertices[f[2]];
+    const ux=v1.x-v0.x,uy=v1.y-v0.y,uz=v1.z-v0.z,vx=v2.x-v0.x,vy=v2.y-v0.y,vz=v2.z-v0.z;
+    const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx,len=Math.hypot(nx,ny,nz)||1;
+    for (let i=1;i<f.length-1;i++) {
+      const a=vertices[f[0]],b=vertices[f[i]],c=vertices[f[i+1]];
+      stl+=`  facet normal ${(nx/len).toFixed(5)} ${(ny/len).toFixed(5)} ${(nz/len).toFixed(5)}\n    outer loop\n`;
+      stl+=`      vertex ${a.x.toFixed(5)} ${a.y.toFixed(5)} ${a.z.toFixed(5)}\n`;
+      stl+=`      vertex ${b.x.toFixed(5)} ${b.y.toFixed(5)} ${b.z.toFixed(5)}\n`;
+      stl+=`      vertex ${c.x.toFixed(5)} ${c.y.toFixed(5)} ${c.z.toFixed(5)}\n`;
+      stl+=`    endloop\n  endfacet\n`;
+    }
+  });
+  stl += 'endsolid meshmaker\n';
+  const blob = new Blob([stl], { type: 'text/plain' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'model.stl'; a.click();
+}
+
+function newScene() {
+  if (!confirm('Clear scene and start fresh?')) return;
+  vertices=[]; faces=[]; groups=[{name:'Group1',faces:[],color:'#00d4ff'}];
+  materials=[{name:'Material1',color:'#00d4ff',opacity:0.9}]; bones=[];
+  selVerts.clear(); selFaces.clear(); wipFace=[]; history=[];
+  renderAll();
+}
+
+// ══════════════════════════════════════════
+//  MODAL
+// ══════════════════════════════════════════
+function showModal(title, bodyHTML, onOK) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHTML;
+  modalCallback = onOK;
+  document.getElementById('modal-overlay').classList.add('show');
+  const firstInput = document.querySelector('#modal-body input');
+  if (firstInput) { firstInput.focus(); firstInput.select(); }
+}
+function closeModal() { document.getElementById('modal-overlay').classList.remove('show'); modalCallback = null; }
+function modalOK() { if (modalCallback) modalCallback(); closeModal(); }
+document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target === document.getElementById('modal-overlay')) closeModal(); });
+
+// ══════════════════════════════════════════
+//  KEYBOARD
+// ══════════════════════════════════════════
+document.addEventListener('keydown', e => {
+  if (document.activeElement.tagName === 'INPUT') return;
+  if (e.ctrlKey && e.key === 'z') { undo(); return; }
+  if (e.ctrlKey && e.key === 'e') { exportOBJ(); return; }
+  if (e.ctrlKey && e.key === 'n') { newScene(); return; }
+  switch(e.key) {
+    case 'Delete': case 'Backspace': deleteSelected(); break;
+    case 'a': case 'A': selectAll(); break;
+    case 'd': case 'D': deselectAll(); break;
+    case 'i': case 'I': invertSelection(); break;
+    case 'v': setTool('vertex'); break;
+    case 'f': setTool('face'); break;
+    case 's': setTool('select'); break;
+    case 'm': setTool('move'); break;
+    case 'g': setTool('rotate'); break;
+    case 'c': setTool('scale'); break;
+    case 'w': case 'W': toggleWireframe(); break;
+    case 'F': frameAll(); break;
+    case 'Escape': wipFace=[]; deselectAll(); break;
+  }
+});
+
+// ══════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════
+Object.keys(views).forEach(k => setupVP(k));
+addPrimitive('box');
+updateLists();
+animate();
+</script>
+</body>
+</html>
