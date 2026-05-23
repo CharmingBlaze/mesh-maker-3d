@@ -1,6 +1,7 @@
 import { VIEW2D_DEFS, pointInPoly, w2s, type View2DKey } from '@/core/math/projection';
 import type { MeshDocument } from '@/core/mesh/MeshDocument';
 import { editableFaceIndices, editableVertexIndices } from '@/systems/layers/layerSystem';
+import { edgeClickSelection } from '@/systems/selection/edgeLoopRing';
 
 export type SelectionMode = 'object' | 'vertex' | 'edge' | 'face';
 export type EdgeKey = `${number},${number}`;
@@ -195,6 +196,7 @@ export interface ClickSelectionInput {
   selFaces: Set<number>;
   shiftKey: boolean;
   ctrlKey?: boolean;
+  altKey?: boolean;
   visibleVerts: Set<number>;
   visibleFaces: Set<number>;
 }
@@ -219,6 +221,7 @@ export function applyClickSelection2D(input: ClickSelectionInput): ClickSelectio
     selFaces,
     shiftKey,
     ctrlKey = false,
+    altKey = false,
     visibleVerts,
     visibleFaces,
   } = input;
@@ -254,14 +257,15 @@ export function applyClickSelection2D(input: ClickSelectionInput): ClickSelectio
   if (selectionMode === 'edge') {
     const edge = nearestEdge2D(sx, sy, vpKey, mesh, vpState, { visibleVertices: visibleVerts, visibleFaces });
     if (edge) {
-      const newSel = new Set(selEdges);
-      if (additive) {
-        if (newSel.has(edge)) newSel.delete(edge);
-        else newSel.add(edge);
-      } else {
-        newSel.clear();
-        newSel.add(edge);
-      }
+      const newSel = edgeClickSelection(
+        mesh,
+        edge,
+        selEdges,
+        shiftKey,
+        ctrlKey,
+        altKey,
+        visibleVerts,
+      );
       return { selVerts: new Set(), selEdges: newSel, selFaces: new Set() };
     }
     if (!additive) return { selVerts: new Set(), selEdges: new Set(), selFaces: new Set() };
@@ -515,6 +519,311 @@ export function getDeleteTargets(
 
 export function hasDeletableSelection(targets: DeleteTargets): boolean {
   return targets.verts.size > 0 || targets.faces.size > 0;
+}
+
+function buildFaceAdjacency(mesh: MeshDocument): Map<number, Set<number>> {
+  const edgeToFaces = new Map<string, number[]>();
+  mesh.faces.forEach((face, fi) => {
+    if (!face || face.length < 2) return;
+    for (let i = 0; i < face.length; i++) {
+      const key = makeEdgeKey(face[i], face[(i + 1) % face.length]);
+      if (!edgeToFaces.has(key)) edgeToFaces.set(key, []);
+      edgeToFaces.get(key)!.push(fi);
+    }
+  });
+
+  const adj = new Map<number, Set<number>>();
+  edgeToFaces.forEach((faces) => {
+    for (let i = 0; i < faces.length; i++) {
+      for (let j = i + 1; j < faces.length; j++) {
+        const a = faces[i];
+        const b = faces[j];
+        if (!adj.has(a)) adj.set(a, new Set());
+        if (!adj.has(b)) adj.set(b, new Set());
+        adj.get(a)!.add(b);
+        adj.get(b)!.add(a);
+      }
+    }
+  });
+  return adj;
+}
+
+function floodLinkedFaces(mesh: MeshDocument, seeds: Set<number>): Set<number> {
+  if (seeds.size === 0) return new Set();
+  const adj = buildFaceAdjacency(mesh);
+  const linked = new Set<number>();
+  const queue = [...seeds];
+  queue.forEach((fi) => linked.add(fi));
+  while (queue.length > 0) {
+    const fi = queue.pop()!;
+    adj.get(fi)?.forEach((nfi) => {
+      if (!linked.has(nfi)) {
+        linked.add(nfi);
+        queue.push(nfi);
+      }
+    });
+  }
+  return linked;
+}
+
+function seedFacesForLinked(
+  mesh: MeshDocument,
+  selectionMode: SelectionMode,
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+): Set<number> {
+  const seeds = new Set<number>();
+  if (selectionMode === 'face') {
+    selFaces.forEach((fi) => seeds.add(fi));
+    return seeds;
+  }
+  if (selectionMode === 'edge') {
+    selEdges.forEach((edge) => {
+      facesContainingEdge(mesh, edge).forEach((fi) => seeds.add(fi));
+    });
+    return seeds;
+  }
+  if (selectionMode === 'vertex') {
+    selVerts.forEach((vi) => {
+      mesh.faces.forEach((face, fi) => {
+        if (face?.includes(vi)) seeds.add(fi);
+      });
+    });
+    return seeds;
+  }
+  return seeds;
+}
+
+/** Expand selection to all faces/edges/verts in the same connected island. */
+export function selectLinkedComponents(
+  mesh: MeshDocument,
+  selectionMode: SelectionMode,
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+  visibleVerts: Set<number>,
+  visibleFaces: Set<number>,
+): { selVerts: Set<number>; selEdges: Set<EdgeKey>; selFaces: Set<number> } {
+  const seeds = seedFacesForLinked(mesh, selectionMode, selVerts, selEdges, selFaces);
+  const filteredSeeds = new Set([...seeds].filter((fi) => visibleFaces.has(fi)));
+  if (filteredSeeds.size === 0) {
+    return { selVerts: new Set(selVerts), selEdges: new Set(selEdges), selFaces: new Set(selFaces) };
+  }
+
+  const linkedFaces = new Set([...floodLinkedFaces(mesh, filteredSeeds)].filter((fi) => visibleFaces.has(fi)));
+
+  if (selectionMode === 'face') {
+    return { selVerts: new Set(), selEdges: new Set(), selFaces: linkedFaces };
+  }
+
+  const linkedEdges = new Set<EdgeKey>();
+  const linkedVerts = new Set<number>();
+  linkedFaces.forEach((fi) => {
+    const face = mesh.faces[fi];
+    if (!face) return;
+    face.forEach((vi) => {
+      if (visibleVerts.has(vi)) linkedVerts.add(vi);
+    });
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i];
+      const b = face[(i + 1) % face.length];
+      if (visibleVerts.has(a) && visibleVerts.has(b)) {
+        linkedEdges.add(makeEdgeKey(a, b));
+      }
+    }
+  });
+
+  if (selectionMode === 'edge') {
+    return { selVerts: new Set(), selEdges: linkedEdges, selFaces: new Set() };
+  }
+
+  return { selVerts: linkedVerts, selEdges: new Set(), selFaces: new Set() };
+}
+
+function vertexToEdges(mesh: MeshDocument): Map<number, Set<EdgeKey>> {
+  const map = new Map<number, Set<EdgeKey>>();
+  mesh.faces.forEach((face) => {
+    if (!face || face.length < 2) return;
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i];
+      const b = face[(i + 1) % face.length];
+      const ek = makeEdgeKey(a, b);
+      if (!map.has(a)) map.set(a, new Set());
+      if (!map.has(b)) map.set(b, new Set());
+      map.get(a)!.add(ek);
+      map.get(b)!.add(ek);
+    }
+  });
+  return map;
+}
+
+function growFaceSelection(
+  mesh: MeshDocument,
+  selFaces: Set<number>,
+  visibleFaces: Set<number>,
+): Set<number> {
+  if (selFaces.size === 0) return new Set();
+  const adj = buildFaceAdjacency(mesh);
+  const next = new Set(selFaces);
+  selFaces.forEach((fi) => {
+    adj.get(fi)?.forEach((nfi) => {
+      if (visibleFaces.has(nfi)) next.add(nfi);
+    });
+  });
+  return next;
+}
+
+function shrinkFaceSelection(mesh: MeshDocument, selFaces: Set<number>): Set<number> {
+  if (selFaces.size === 0) return new Set();
+  const adj = buildFaceAdjacency(mesh);
+  const next = new Set<number>();
+  selFaces.forEach((fi) => {
+    const neighbors = adj.get(fi) ?? new Set<number>();
+    const isInterior = [...neighbors].every((nfi) => selFaces.has(nfi));
+    if (isInterior) next.add(fi);
+  });
+  return next;
+}
+
+function growEdgeSelection(
+  mesh: MeshDocument,
+  selEdges: Set<EdgeKey>,
+  visibleVerts: Set<number>,
+): Set<EdgeKey> {
+  if (selEdges.size === 0) return new Set();
+  const touchVerts = new Set<number>();
+  selEdges.forEach((edge) => {
+    const [a, b] = parseEdgeKey(edge);
+    touchVerts.add(a);
+    touchVerts.add(b);
+  });
+  const next = new Set(selEdges);
+  uniqueMeshEdges(mesh).forEach((edge) => {
+    const [a, b] = parseEdgeKey(edge);
+    if (!visibleVerts.has(a) || !visibleVerts.has(b)) return;
+    if (touchVerts.has(a) || touchVerts.has(b)) next.add(edge);
+  });
+  return next;
+}
+
+function shrinkEdgeSelection(mesh: MeshDocument, selEdges: Set<EdgeKey>): Set<EdgeKey> {
+  if (selEdges.size === 0) return new Set();
+  const incident = vertexToEdges(mesh);
+  const next = new Set<EdgeKey>();
+  selEdges.forEach((edge) => {
+    const [a, b] = parseEdgeKey(edge);
+    let boundary = false;
+    for (const vi of [a, b]) {
+      incident.get(vi)?.forEach((other) => {
+        if (!selEdges.has(other)) boundary = true;
+      });
+    }
+    if (!boundary) next.add(edge);
+  });
+  return next;
+}
+
+function growVertexSelection(
+  mesh: MeshDocument,
+  selVerts: Set<number>,
+  visibleVerts: Set<number>,
+): Set<number> {
+  if (selVerts.size === 0) return new Set();
+  const next = new Set(selVerts);
+  mesh.faces.forEach((face) => {
+    if (!face) return;
+    face.forEach((vi, i) => {
+      if (!selVerts.has(vi)) return;
+      const prev = face[(i + face.length - 1) % face.length];
+      const nxt = face[(i + 1) % face.length];
+      if (visibleVerts.has(prev)) next.add(prev);
+      if (visibleVerts.has(nxt)) next.add(nxt);
+    });
+  });
+  return next;
+}
+
+function shrinkVertexSelection(mesh: MeshDocument, selVerts: Set<number>): Set<number> {
+  if (selVerts.size === 0) return new Set();
+  const incident = vertexToEdges(mesh);
+  const next = new Set<number>();
+  selVerts.forEach((vi) => {
+    let boundary = false;
+    incident.get(vi)?.forEach((edge) => {
+      const [a, b] = parseEdgeKey(edge);
+      const other = a === vi ? b : a;
+      if (!selVerts.has(other)) boundary = true;
+    });
+    if (!boundary) next.add(vi);
+  });
+  return next;
+}
+
+/** Grow selection by one ring of adjacent components. */
+export function growSelectionComponents(
+  mesh: MeshDocument,
+  selectionMode: SelectionMode,
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+  visibleVerts: Set<number>,
+  visibleFaces: Set<number>,
+): { selVerts: Set<number>; selEdges: Set<EdgeKey>; selFaces: Set<number> } {
+  if (selectionMode === 'face') {
+    return {
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: growFaceSelection(mesh, selFaces, visibleFaces),
+    };
+  }
+  if (selectionMode === 'edge') {
+    return {
+      selVerts: new Set(),
+      selEdges: growEdgeSelection(mesh, selEdges, visibleVerts),
+      selFaces: new Set(),
+    };
+  }
+  if (selectionMode === 'vertex') {
+    return {
+      selVerts: growVertexSelection(mesh, selVerts, visibleVerts),
+      selEdges: new Set(),
+      selFaces: new Set(),
+    };
+  }
+  return { selVerts: new Set(selVerts), selEdges: new Set(selEdges), selFaces: new Set(selFaces) };
+}
+
+/** Shrink selection by removing the outer boundary layer. */
+export function shrinkSelectionComponents(
+  mesh: MeshDocument,
+  selectionMode: SelectionMode,
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+): { selVerts: Set<number>; selEdges: Set<EdgeKey>; selFaces: Set<number> } {
+  if (selectionMode === 'face') {
+    return {
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: shrinkFaceSelection(mesh, selFaces),
+    };
+  }
+  if (selectionMode === 'edge') {
+    return {
+      selVerts: new Set(),
+      selEdges: shrinkEdgeSelection(mesh, selEdges),
+      selFaces: new Set(),
+    };
+  }
+  if (selectionMode === 'vertex') {
+    return {
+      selVerts: shrinkVertexSelection(mesh, selVerts),
+      selEdges: new Set(),
+      selFaces: new Set(),
+    };
+  }
+  return { selVerts: new Set(selVerts), selEdges: new Set(selEdges), selFaces: new Set(selFaces) };
 }
 
 /** Face/edge/object mode used for picking while modeling tools are active. */

@@ -1,65 +1,102 @@
 import { useState } from 'react';
-import { useEditorStore, type FaceDrawMode, type ToolId } from '@/store/editorStore';
+import { useEditorStore, type ComponentSelectionMode, type FaceDrawMode, type ToolId } from '@/store/editorStore';
 import { meshStats } from '@/core/mesh/MeshDocument';
 import { PRIMITIVE_CATALOG } from '@/systems/mesh/primitives';
-import { LayersPanel } from '@/components/panels/LayersPanel';
 import { GeometryLayersPanel } from '@/components/panels/GeometryLayersPanel';
+import {
+  PanelGroupLabel,
+  PanelHint,
+  PanelPillRow,
+  PanelSection,
+  PanelToggle,
+  TransformFields,
+} from '@/components/panels/panelUi';
 import { SnapGridSection } from './SnapGridSection';
-import { MaterialsTab } from './MaterialsTab';
 import { useMeshDocument } from '@/hooks/useSceneRevision';
 
-type SideTab = 'model' | 'layers' | 'groups' | 'materials' | 'joints';
+type SideTab = 'model' | 'layers';
 
-const TOOLS: { id: ToolId; label: string }[] = [
-  { id: 'select', label: 'Select' },
-  { id: 'move', label: 'Move' },
-  { id: 'rotate', label: 'Rotate' },
-  { id: 'scale', label: 'Scale' },
-  { id: 'extrude', label: 'Extrude' },
-  { id: 'bevel', label: 'Bevel' },
-  { id: 'inset', label: 'Inset' },
-  { id: 'vertex', label: 'Vertex' },
-  { id: 'face', label: 'Face' },
+const SELECTION_MODES: { id: ComponentSelectionMode | 'object'; label: string; key: string }[] = [
+  { id: 'object', label: 'Object', key: '1' },
+  { id: 'vertex', label: 'Vertex', key: '2' },
+  { id: 'edge', label: 'Edge', key: '3' },
+  { id: 'face', label: 'Face', key: '4' },
 ];
 
-const FACE_DRAW_MODES: { id: FaceDrawMode; label: string; title: string }[] = [
-  { id: 'none', label: 'None', title: 'Place vertices only; fill faces later with the Face tool' },
-  { id: 'tri', label: 'Tris', title: 'Auto-fill a triangle every 3 vertices' },
-  { id: 'quad', label: 'Quads', title: 'Auto-fill a quad every 4 vertices' },
+const TRANSFORM_TOOLS: { id: ToolId; label: string; key: string }[] = [
+  { id: 'select', label: 'Select', key: 'S' },
+  { id: 'move', label: 'Move', key: 'M' },
+  { id: 'rotate', label: 'Rotate', key: 'G' },
+  { id: 'scale', label: 'Scale', key: 'C' },
+];
+
+const MESH_TOOLS: { id: ToolId; label: string; key: string }[] = [
+  { id: 'extrude', label: 'Extrude', key: 'E' },
+  { id: 'bevel', label: 'Bevel', key: 'B' },
+  { id: 'inset', label: 'Inset', key: 'J' },
+  { id: 'knife', label: 'Knife', key: 'K' },
+  { id: 'vertex', label: 'Vertex', key: 'V' },
+  { id: 'face', label: 'Face', key: 'F' },
+];
+
+const FACE_DRAW_MODES: { id: FaceDrawMode; label: string; title?: string }[] = [
+  { id: 'none', label: 'Off', title: 'Vertices only — fill faces manually' },
+  { id: 'tri', label: 'Tris', title: 'Auto triangle every 3 verts' },
+  { id: 'quad', label: 'Quads', title: 'Auto quad every 4 verts' },
 ];
 
 function SidePanel() {
   const [tab, setTab] = useState<SideTab>('model');
 
   return (
-    <div className="side-panel">
-      <div className="ms-tabs">
+    <aside className="side-panel studio-panel" aria-label="Model properties">
+      <div className="sp-tabs">
         {(
           [
             ['model', 'Model'],
-            ['layers', 'Layers'],
-            ['groups', 'Groups'],
-            ['materials', 'Mats'],
-            ['joints', 'Joints'],
+            ['layers', 'Geo Layers'],
           ] as const
         ).map(([id, label]) => (
           <button
             key={id}
             type="button"
-            className={`ms-tab ${tab === id ? 'active' : ''}`}
+            className={`sp-tab ${tab === id ? 'active' : ''}`}
             onClick={() => setTab(id)}
+            aria-selected={tab === id}
           >
             {label}
           </button>
         ))}
       </div>
-      <div className="ms-tab-body">
-        {tab === 'layers' && <LayersPanel />}
-        {tab === 'model' && <ModelTab />}
-        {tab === 'groups' && <GroupsTab />}
-        {tab === 'materials' && <MaterialsTab />}
-        {tab === 'joints' && <JointsTab />}
+      <div className="sp-tab-body">
+        {tab === 'model' ? <ModelTab /> : <GeometryLayersPanel tabView />}
       </div>
+    </aside>
+  );
+}
+
+function ToolGrid({
+  tools,
+  activeTool,
+  onPick,
+}: {
+  tools: { id: ToolId; label: string; key: string }[];
+  activeTool: ToolId;
+  onPick: (id: ToolId) => void;
+}) {
+  return (
+    <div className="sp-tool-grid">
+      {tools.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          className={`sp-tool-btn ${activeTool === t.id ? 'active' : ''}`}
+          title={`${t.label} (${t.key})`}
+          onClick={() => onPick(t.id)}
+        >
+          <span className="sp-tool-label">{t.label}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -68,12 +105,16 @@ function ModelTab() {
   const tool = useEditorStore((s) => s.tool);
   const faceDrawMode = useEditorStore((s) => s.faceDrawMode);
   const setTool = useEditorStore((s) => s.setTool);
+  const activateKnifeTool = useEditorStore((s) => s.activateKnifeTool);
   const setSelectionMode = useEditorStore((s) => s.setSelectionMode);
+  const enterMeshEditMode = useEditorStore((s) => s.enterMeshEditMode);
   const selectionMode = useEditorStore((s) => s.selectionMode);
   const setFaceDrawMode = useEditorStore((s) => s.setFaceDrawMode);
   const fillHoleDoubleSided = useEditorStore((s) => s.fillHoleDoubleSided);
   const setFillHoleDoubleSided = useEditorStore((s) => s.setFillHoleDoubleSided);
   const primDraw = useEditorStore((s) => s.primDraw);
+  const primChainPlace = useEditorStore((s) => s.primChainPlace);
+  const setPrimChainPlace = useEditorStore((s) => s.setPrimChainPlace);
   const startPrimDraw = useEditorStore((s) => s.startPrimDraw);
   const cancelPrimDraw = useEditorStore((s) => s.cancelPrimDraw);
   const wireframe = useEditorStore((s) => s.wireframe);
@@ -94,258 +135,152 @@ function ModelTab() {
   const [ty, setTy] = useState(0);
   const [tz, setTz] = useState(0);
 
-  const updateTransformFromSelection = () => {
+  const readSelectionPivot = () => {
+    if (!mesh.vertices.length) return;
     const selectedVerts = selectedTransformVerts();
-    if (selectedVerts.size > 0) {
-      const arr = [...selectedVerts].map((i) => mesh.vertices[i]);
-      setTx(Math.round(arr.reduce((s, v) => s + v.x, 0) / arr.length));
-      setTy(Math.round(arr.reduce((s, v) => s + v.y, 0) / arr.length));
-      setTz(Math.round(arr.reduce((s, v) => s + v.z, 0) / arr.length));
-    }
+    if (selectedVerts.size === 0) return;
+    const arr = [...selectedVerts].map((i) => mesh.vertices[i]);
+    setTx(Math.round(arr.reduce((s, v) => s + v.x, 0) / arr.length));
+    setTy(Math.round(arr.reduce((s, v) => s + v.y, 0) / arr.length));
+    setTz(Math.round(arr.reduce((s, v) => s + v.z, 0) / arr.length));
   };
 
   return (
-    <>
-      <fieldset className="ms-fieldset">
-        <legend>Tools</legend>
-        <div className="ms-tool-grid">
-          {TOOLS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`ms-btn ms-tool-btn ${
-                t.id === 'face'
-                  ? selectionMode === 'face'
-                    ? 'active'
-                    : ''
-                  : tool === t.id
-                    ? 'active'
-                    : ''
-              }`}
-              onClick={() => {
-                if (t.id === 'face') setSelectionMode('face');
-                else setTool(t.id);
-              }}
-              title={t.id === 'face' ? 'Face selection mode (key 4)' : undefined}
-            >
-              {t.id === 'face' ? 'Face Sel' : t.label}
-            </button>
-          ))}
-        </div>
-      </fieldset>
-
-      <fieldset className="ms-fieldset">
-        <legend>Shapes</legend>
-        <div className="ms-shape-grid">
-          {PRIMITIVE_CATALOG.map((p) => (
-            <button
-              key={p.type}
-              type="button"
-              className={`ms-btn ms-shape-btn ${primDraw?.type === p.type ? 'active' : ''}`}
-              onClick={() => (primDraw?.type === p.type ? cancelPrimDraw() : startPrimDraw(p.type))}
-              title={`Draw ${p.type}`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-        {primDraw && (
-          <div className="ms-help-line">
-            Click viewport to place · drag for custom size
+    <div className="sp-model-shell">
+      <div className="sp-model-scroll">
+        <PanelSection title="Modeling">
+          <PanelGroupLabel>Selection · Tab toggles Object/Edit</PanelGroupLabel>
+          <div className="sp-mode-grid">
+            {SELECTION_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                className={`sp-mode-btn ${selectionMode === mode.id ? 'active' : ''}`}
+                title={`${mode.label} (${mode.key})`}
+                onClick={() => {
+                  if (mode.id === 'object') {
+                    setSelectionMode('object');
+                  } else if (selectionMode === 'object') {
+                    enterMeshEditMode(mode.id);
+                  } else {
+                    setSelectionMode(mode.id);
+                  }
+                }}
+              >
+                <span className="sp-mode-btn-label">{mode.label}</span>
+              </button>
+            ))}
           </div>
-        )}
-      </fieldset>
 
-      <fieldset className="ms-fieldset">
-        <legend>Face Fill</legend>
-        <div className="ms-segment-row">
-          {FACE_DRAW_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              className={`ms-btn ms-segment-btn ${faceDrawMode === mode.id ? 'active' : ''}`}
-              title={mode.title}
-              onClick={() => setFaceDrawMode(mode.id)}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-        <div className="ms-help-line">
-          {faceDrawMode === 'none'
-            ? 'Vertex tool creates points only. Face tool can close polygons later.'
-            : faceDrawMode === 'tri'
-              ? 'Every 3 picked vertices becomes one triangle.'
-              : 'Every 4 picked vertices becomes one quad.'}
-        </div>
-        <label className="ms-check-row ms-fill-hole-opt">
-          <input
-            type="checkbox"
-            checked={fillHoleDoubleSided}
-            onChange={(e) => setFillHoleDoubleSided(e.target.checked)}
+          <PanelGroupLabel>Transform tools</PanelGroupLabel>
+          <ToolGrid tools={TRANSFORM_TOOLS} activeTool={tool} onPick={setTool} />
+
+          <PanelGroupLabel>Mesh tools</PanelGroupLabel>
+          <ToolGrid
+            tools={MESH_TOOLS}
+            activeTool={tool}
+            onPick={(id) => (id === 'knife' ? activateKnifeTool() : setTool(id))}
           />
-          Double-sided (front + back face on fill)
-        </label>
-        <div className="ms-btn-row">
-          <button
-            type="button"
-            className="ms-btn"
-            onClick={fillHole}
-            title="Create a face across a hole (select boundary vertices or edges first)"
-          >
-            Fill Hole
-          </button>
-        </div>
-        <div className="ms-help-line">
-          Select vertices around a gap, enable double-sided if needed, then Fill Hole.
-        </div>
-      </fieldset>
+        </PanelSection>
 
-      <fieldset className="ms-fieldset">
-        <legend>Mesh</legend>
-        <div className="ms-btn-row">
-          <button
-            type="button"
-            className="ms-btn"
-            onClick={flipNormals}
-            title="Reverse selected face winding (Shift+N). No selection = all faces."
-          >
-            Flip Normals
-          </button>
-        </div>
-      </fieldset>
-
-      <fieldset className="ms-fieldset">
-        <legend>Transform</legend>
-        <div className="ms-form-row">
-          <label>X</label>
-          <input type="number" value={tx} step={5} onChange={(e) => setTx(+e.target.value)} />
-        </div>
-        <div className="ms-form-row">
-          <label>Y</label>
-          <input type="number" value={ty} step={5} onChange={(e) => setTy(+e.target.value)} />
-        </div>
-        <div className="ms-form-row">
-          <label>Z</label>
-          <input type="number" value={tz} step={5} onChange={(e) => setTz(+e.target.value)} />
-        </div>
-        <div className="ms-btn-row">
-          <button type="button" className="ms-btn" onClick={() => applyMove(tx, ty, tz)}>
-            Move
-          </button>
-          <button type="button" className="ms-btn" onClick={() => applyRotate(tx, ty, tz)}>
-            Rotate
-          </button>
-          <button type="button" className="ms-btn" onClick={() => applyScale(tx || 1, ty || 1, tz || 1)}>
-            Scale
-          </button>
-          <button type="button" className="ms-btn" onClick={updateTransformFromSelection}>
-            Read
-          </button>
-        </div>
-      </fieldset>
-
-      <fieldset className="ms-fieldset">
-        <legend>Display</legend>
-        <div className="ms-check-row">
-          <label>
-            <input type="checkbox" checked={wireframe} onChange={toggleWireframe} />
-            Wireframe
-          </label>
-          <label>
-            <input type="checkbox" checked={flatShading} onChange={toggleFlat} />
-            Flat shaded
-          </label>
-        </div>
-        <div className="ms-btn-row">
-          <button type="button" className="ms-btn" onClick={frameAll}>
-            Frame All
-          </button>
-        </div>
-      </fieldset>
-
-      <SnapGridSection />
-
-      <GeometryLayersPanel />
-
-      <div className="ms-stats-line">
-        Verts: {stats.verts} · Faces: {stats.faces} · Tris: {stats.tris}
-      </div>
-    </>
-  );
-}
-
-function GroupsTab() {
-  const mesh = useMeshDocument();
-  const groupSel = useEditorStore((s) => s.groupSel);
-  const setGroupSel = useEditorStore((s) => s.setGroupSel);
-  const addGroup = useEditorStore((s) => s.addGroup);
-  const renameGroup = useEditorStore((s) => s.renameGroup);
-  const assignGroup = useEditorStore((s) => s.assignGroup);
-  const deleteGroup = useEditorStore((s) => s.deleteGroup);
-
-  return (
-    <>
-      <fieldset className="ms-fieldset">
-        <legend>Groups</legend>
-        <div className="ms-list">
-          {mesh.groups.map((g, i) => (
-            <button
-              key={i}
-              type="button"
-              className={`ms-list-item ${i === groupSel ? 'sel' : ''}`}
-              onClick={() => setGroupSel(i)}
-            >
-              <span className="ms-swatch" style={{ background: g.color }} />
-              <span className="ms-list-label">
-                {g.name} ({g.faces.length})
-              </span>
+        <PanelSection title="Mesh editing">
+          <PanelGroupLabel>Auto face fill (vertex tool)</PanelGroupLabel>
+          <PanelPillRow options={FACE_DRAW_MODES} value={faceDrawMode} onChange={setFaceDrawMode} />
+          <PanelToggle
+            checked={fillHoleDoubleSided}
+            onChange={setFillHoleDoubleSided}
+            label="Double-sided fill hole"
+            title="Adds front and back faces when filling holes"
+          />
+          <div className="sp-action-row">
+            <button type="button" className="sp-action-btn sp-action-btn--primary" onClick={fillHole} title="Fill hole (Alt+H)">
+              Fill hole
             </button>
-          ))}
-        </div>
-        <div className="ms-btn-row">
-          <button type="button" className="ms-btn" onClick={addGroup}>
-            New
-          </button>
-          <button type="button" className="ms-btn" onClick={renameGroup}>
-            Rename
-          </button>
-          <button type="button" className="ms-btn" onClick={assignGroup}>
-            Assign
-          </button>
-          <button type="button" className="ms-btn" onClick={deleteGroup}>
-            Delete
-          </button>
-        </div>
-      </fieldset>
-    </>
-  );
-}
-
-function JointsTab() {
-  const mesh = useMeshDocument();
-  const addBone = useEditorStore((s) => s.addBone);
-  const deleteBone = useEditorStore((s) => s.deleteBone);
-
-  return (
-    <fieldset className="ms-fieldset">
-      <legend>Joints</legend>
-      <div className="ms-list">
-        {mesh.bones.map((b, i) => (
-          <div key={i} className="ms-list-item">
-            <span className="ms-list-label">{b.name}</span>
+            <button type="button" className="sp-action-btn" onClick={flipNormals} title="Flip normals (Shift+N)">
+              Flip normals
+            </button>
           </div>
-        ))}
+        </PanelSection>
+
+        <PanelSection title="Primitives" defaultOpen>
+          <div className="sp-prim-grid">
+            {PRIMITIVE_CATALOG.map((p) => (
+              <button
+                key={p.type}
+                type="button"
+                className={`sp-prim-btn ${primDraw?.type === p.type ? 'active' : ''}`}
+                onClick={() => (primDraw?.type === p.type ? cancelPrimDraw() : startPrimDraw(p.type))}
+                title={p.label}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {primDraw ? (
+            <PanelToggle
+              checked={primChainPlace}
+              onChange={setPrimChainPlace}
+              label="Keep tool active after place"
+            />
+          ) : (
+            <PanelHint>Click a shape, drag in the viewport to draw. Uses Object mode, then Edit.</PanelHint>
+          )}
+        </PanelSection>
+
+        <PanelSection title="Transform values" defaultOpen={false}>
+          <TransformFields x={tx} y={ty} z={tz} onX={setTx} onY={setTy} onZ={setTz} />
+          <div className="sp-chip-row">
+            <button type="button" className="sp-chip" onClick={() => applyMove(tx, ty, tz)}>
+              Apply move
+            </button>
+            <button type="button" className="sp-chip" onClick={() => applyRotate(tx, ty, tz)}>
+              Apply rotate
+            </button>
+            <button type="button" className="sp-chip" onClick={() => applyScale(tx || 1, ty || 1, tz || 1)}>
+              Apply scale
+            </button>
+            <button type="button" className="sp-chip sp-chip--muted" onClick={readSelectionPivot} title="Read pivot from selection">
+              From selection
+            </button>
+          </div>
+        </PanelSection>
+
+        <PanelSection title="View & grid" defaultOpen={false}>
+          <PanelGroupLabel>Display</PanelGroupLabel>
+          <div className="sp-chip-row">
+            <button
+              type="button"
+              className={`sp-chip ${wireframe ? 'active' : ''}`}
+              onClick={toggleWireframe}
+              title="Wireframe (W)"
+            >
+              Wireframe
+            </button>
+            <button
+              type="button"
+              className={`sp-chip ${flatShading ? 'active' : ''}`}
+              onClick={toggleFlat}
+              title="Flat shading"
+            >
+              Flat shade
+            </button>
+            <button type="button" className="sp-chip" onClick={frameAll} title="Frame all (Shift+F)">
+              Frame all
+            </button>
+          </div>
+          <PanelGroupLabel>Grid & snap</PanelGroupLabel>
+          <SnapGridSection embedded />
+        </PanelSection>
       </div>
-      <div className="ms-btn-row">
-        <button type="button" className="ms-btn" onClick={addBone}>
-          Add
-        </button>
-        <button type="button" className="ms-btn" onClick={deleteBone}>
-          Delete
-        </button>
-      </div>
-    </fieldset>
+
+      <footer className="sp-stats-footer">
+        <span>{stats.verts} verts</span>
+        <span className="sp-stats-sep">·</span>
+        <span>{stats.faces} faces</span>
+        <span className="sp-stats-sep">·</span>
+        <span>{stats.tris} tris</span>
+      </footer>
+    </div>
   );
 }
 

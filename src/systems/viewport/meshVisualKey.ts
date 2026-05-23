@@ -1,4 +1,5 @@
 import type { MeshDocument } from '@/core/mesh/MeshDocument';
+import { faceUvsContentHash } from '@/core/mesh/faceUv';
 import type { EdgeKey } from '@/systems/selection/selectionSystem';
 import type { SceneRenderEntry } from '@/systems/scene/sceneObjectHelpers';
 
@@ -21,6 +22,10 @@ export function meshVisualKey(
     const z = mesh.vertices[n - 1];
     sig += `|${a.x.toFixed(2)},${a.y.toFixed(2)},${m.z.toFixed(2)},${z.x.toFixed(2)}`;
   }
+  if (mesh.texture) {
+    sig += `|tex:${mesh.texture.width}x${mesh.texture.height}:${mesh.texture.dataUrl.length}`;
+    sig += `|uv:${faceUvsContentHash(mesh)}`;
+  }
   return sig;
 }
 
@@ -41,6 +46,9 @@ export function sceneVisualKey(
     const mesh = entry.mesh;
     const t = entry.transform;
     sig += `|${entry.nodeId}:${entry.visible}:${entry.selected}:${mesh.vertices.length}:${mesh.faces.length}:${t.position.x.toFixed(1)},${t.position.y.toFixed(1)},${t.position.z.toFixed(1)}`;
+    if (mesh.texture) {
+      sig += `:tex${mesh.texture.dataUrl.length}:uv${faceUvsContentHash(mesh)}`;
+    }
   }
   return sig;
 }

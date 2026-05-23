@@ -5,9 +5,10 @@ import { CommandHistory } from '@/core/commands/CommandHistory';
 import { SnapshotCommand, type EditorSnapshot } from '@/core/commands/Command';
 import { editorEvents } from '@/core/events/EventBus';
 import type { PrimitiveType } from '@/systems/mesh/primitives';
-import { createPrimitiveMeshDocument } from '@/systems/mesh/primitiveFromBounds';
+import { addPrimitiveInBounds, createPrimitiveMeshDocument } from '@/systems/mesh/primitiveFromBounds';
 import { createPrimDrawState, type PrimDrawState } from '@/systems/mesh/primDraw';
-import { canCommitPrimDraw } from '@/hooks/primDrawHelpers';
+import { canCommitPrimDraw, boundsToPrimSize, type PrimSize } from '@/hooks/primDrawHelpers';
+import { canCommitKnifeCut, popKnifePoint } from '@/systems/mesh/knifeDraw';
 import { enforceMinSize } from '@/core/math/BoundingBox';
 import * as meshOps from '@/systems/mesh/meshOperations';
 import { exportOBJ, exportSTL, exportPLY, exportGLTF } from '@/systems/export/exporters';
@@ -19,16 +20,27 @@ import {
 } from '@/systems/io/fileAccess';
 import { PROJECT_EXTENSION, PROJECT_MIME } from '@/systems/io/projectFormat';
 import { importFile } from '@/systems/import/importRouter';
+import type { MirrorAxis } from '@/systems/mesh/mirrorGeometry';
+import {
+  resolveMirrorSourceFaces,
+  type MirrorPreviewState,
+} from '@/systems/mesh/mirrorGeometry';
+import {
+  originToGeometry as originToGeometryImpl,
+  geometryToOrigin as geometryToOriginImpl,
+} from '@/systems/scene/objectOrigin';
 import {
   addMeshToScene,
   cloneMeshesRecord,
   getMeshForNode,
   getMeshNodes,
   getNodeForMeshId,
+  meshForViewportPick,
   meshesFromArray,
-  meshesToArray,
+  meshesInScene,
   nextObjectName,
   removeMeshFromScene,
+  resolveActiveMeshId,
   sceneWorldBounds,
   type MeshesRecord,
 } from '@/systems/scene/sceneObjectHelpers';
@@ -37,9 +49,13 @@ import {
   pickSceneObject3D,
   toggleNodeSelection,
 } from '@/systems/scene/scenePick';
-import { frame2DViewports, frame2DViewportsFromBounds } from '@/systems/viewport/viewportFrame';
+import { frame2DViewports, frame2DViewportsFromBounds, centerOrigin2D } from '@/systems/viewport/viewportFrame';
+import { getViewport2DSizes, LEGACY_VIEWPORT_SIZE } from '@/systems/viewport/viewportSizes';
 import type { View2DKey } from '@/core/math/projection';
-import type { ViewportLayoutId } from '@/systems/viewport/viewportLayout';
+import type { ViewportLayoutId, ViewportSlotId, ViewportViewId } from '@/systems/viewport/viewportLayout';
+import { DEFAULT_VIEWPORT_SLOT_VIEWS } from '@/systems/viewport/viewportLayout';
+import { createBlankTexture, resizeTextureMapAsync, TEXTURE_DEFAULT_SIZE, type TextureMap } from '@/core/mesh/textureMap';
+import { autoLayoutFaceUvs, ensureFaceUvsArray, layoutMissingFaceUvs } from '@/core/mesh/faceUv';
 import {
   createLayer,
   editableFaceIndices,
@@ -60,7 +76,11 @@ import {
   uniqueMeshEdges,
   type EdgeKey,
   type SelectionMode,
+  selectLinkedComponents,
+  growSelectionComponents,
+  shrinkSelectionComponents,
 } from '@/systems/selection/selectionSystem';
+import { selectEdgeLoop } from '@/systems/selection/edgeLoopRing';
 import { applyClickSelection3D, boxSelect3D } from '@/systems/viewport/pick3D';
 import { clampSnapSize, snapScalar } from '@/systems/viewport/snapGrid';
 import * as THREE from 'three';
@@ -73,6 +93,7 @@ export type ToolId =
   | 'extrude'
   | 'bevel'
   | 'inset'
+  | 'knife'
   | 'vertex'
   | 'face';
 export type FaceDrawMode = 'none' | 'tri' | 'quad';
@@ -81,26 +102,31 @@ export type LayerState = MeshLayer;
 
 export const TOOL_HINTS: Record<ToolId, string> = {
   select: 'Face/Edge/Vertex mode · Click pick · Drag box = marquee · Shift/Ctrl = add',
-  move: 'Select verts/edges/faces first · Drag anywhere to move · Side panel Move also works',
+  move: 'Drag selection or use X/Y/Z arrows in 3D view · Side panel Move also works',
   rotate: 'Click = select · Drag = rotate selection around its center',
   scale: 'Click = select · Drag = scale selection around its center',
-  extrude: 'Shift/Ctrl+click = add/remove face · Shift/Ctrl+box = multi-select · Drag selected face to extrude',
-  bevel: 'Shift/Ctrl+click = add/remove edge · Shift/Ctrl+box = multi-select · Drag selected edge to bevel',
+  extrude: 'E = modal extrude · Drag selected face · Shift/Ctrl+click = add/remove face',
+  bevel: 'B = modal bevel · Drag selected edge · Shift/Ctrl+click = add/remove edge',
   inset: 'Shift/Ctrl+click = add/remove face · Shift/Ctrl+box = multi-select · Drag selected face to inset',
+  knife: 'Snaps to cut nodes · mesh verts/edges · Enter confirm · Esc cancel · Backspace undo',
   vertex: 'Click to chain vertices (Tris/Quads auto-face) · click first again to close · drag to move',
   face: 'Click vertices in order · Tri/Quad auto-fills · None waits until first vertex is clicked again',
 };
 
 export const MODE_HINTS: Record<SelectionMode, string> = {
-  object: 'Object mode: click layer scenes to select · Move/Rotate/Scale transforms the whole layer scene',
-  vertex: 'Vertex mode: click to chain/build mesh · drag to move · Shift/Ctrl = add/remove from selection',
-  edge: 'Edge mode: select and transform connected edge endpoints',
-  face: 'Click face to select · Drag box = marquee multi-select · Shift/Ctrl add/remove',
+  object: 'Object mode: select whole meshes · Move/Rotate/Scale transforms the object · Tab = Edit Mode',
+  vertex: 'Edit mode (Vertex): pick/drag vertices · L linked · Tab = Object Mode',
+  edge: 'Edit mode (Edge): Alt+click = loop · Alt+Shift+click = ring · Ctrl+Alt = toggle · L linked · Tab = Object Mode',
+  face: 'Edit mode (Face): select faces · E extrude · J inset · L linked · Tab = Object Mode',
 };
+
+export type ComponentSelectionMode = Exclude<SelectionMode, 'object'>;
 
 export interface Viewport2DState {
   pan: { x: number; y: number };
   zoom: number;
+  /** Viewport dimensions pan/zoom were last adjusted for (defaults to legacy 480×480). */
+  viewSize?: { w: number; h: number };
 }
 
 export interface ModalState {
@@ -136,13 +162,36 @@ interface EditorState {
   selVerts: Set<number>;
   selEdges: Set<EdgeKey>;
   selFaces: Set<number>;
-  activeVP: View2DKey | '3d';
-  /** When set, that viewport fills the workspace; null = use viewportLayout. */
-  maximizedVP: View2DKey | '3d' | null;
+  activeVP: ViewportViewId;
+  /** Layout panel that receives keyboard focus and maximize. */
+  activeSlot: ViewportSlotId;
+  /** Which view each layout panel displays (swapping swaps with the other panel showing that view). */
+  viewportSlotViews: Record<ViewportSlotId, ViewportViewId>;
+  /** When set, that viewport panel fills the workspace; null = use viewportLayout. */
+  maximizedVP: ViewportSlotId | null;
   viewportLayout: ViewportLayoutId;
   vp2d: Record<View2DKey, Viewport2DState>;
   renderTick: number;
   primDraw: PrimDrawState | null;
+  knifeDraw: import('@/systems/mesh/knifeDraw').KnifeDrawState | null;
+  /** Last vertex/edge/face mode — restored when Tab exits Object mode. */
+  lastComponentSelectionMode: ComponentSelectionMode;
+  /** Remember W×H×D from the last placed primitive of each type. */
+  lastPrimSizes: Partial<Record<PrimitiveType, PrimSize>>;
+  /** When true, stay in draw mode after placing a primitive. */
+  primChainPlace: boolean;
+  /** Next viewport click starts modal extrude/bevel drag (E/B). */
+  armedModeling: 'extrude' | 'bevel' | 'loopcut' | 'edgeslide' | 'mirror' | null;
+  /** Live loop-cut preview before commit (Ctrl+R). */
+  loopCutPreview: import('@/hooks/loopCutDrag').LoopCutPreviewState | null;
+  /** Live edge-slide preview before commit. */
+  edgeSlidePreview: import('@/systems/mesh/edgeSlide').EdgeSlidePreviewState | null;
+  /** Live mirror preview before commit. */
+  mirrorPreview: MirrorPreviewState | null;
+
+  textureEditorTool: 'paint' | 'eyedropper' | 'select' | 'eraser' | 'fill' | 'uv';
+  textureBrushSize: number;
+  textureBrushColor: string;
 
   modal: ModalState | null;
   projectFileName: string | null;
@@ -157,6 +206,8 @@ interface EditorState {
   setFaceDrawMode: (mode: FaceDrawMode) => void;
   setFillHoleDoubleSided: (enabled: boolean) => void;
   setSelectionMode: (mode: SelectionMode) => void;
+  toggleObjectEditMode: () => void;
+  enterMeshEditMode: (mode?: ComponentSelectionMode) => void;
   snap: (v: number) => number;
   undo: () => void;
   redo: () => void;
@@ -169,6 +220,7 @@ interface EditorState {
   applyProject: (project: ProjectFileV2, fileName: string | null) => void;
 
   getActiveMesh: () => MeshDocument;
+  hasSceneObjects: () => boolean;
   setActiveMesh: (meshId: string) => void;
   selectSceneNode: (nodeId: string, shiftKey?: boolean, ctrlKey?: boolean) => void;
   setSelectedNodeIds: (ids: Set<string>) => void;
@@ -191,12 +243,23 @@ interface EditorState {
   selectAll: () => void;
   deselectAll: () => void;
   invertSelection: () => void;
+  selectLinked: () => void;
+  growSelection: () => void;
+  shrinkSelection: () => void;
   deleteSelected: () => void;
 
   startPrimDraw: (type: PrimitiveType) => void;
   cancelPrimDraw: () => void;
   setPrimDraw: (draw: PrimDrawState | null) => void;
+  setPrimChainPlace: (enabled: boolean) => void;
+  armModeling: (kind: 'extrude' | 'bevel') => void;
+  clearArmedModeling: () => void;
   commitPrimDraw: () => void;
+  setKnifeDraw: (draw: import('@/systems/mesh/knifeDraw').KnifeDrawState | null) => void;
+  undoKnifePoint: () => void;
+  cancelKnifeDraw: () => void;
+  activateKnifeTool: (restart?: boolean) => void;
+  commitKnifeCut: () => void;
   weldVerts: (thresh?: number) => void;
   weldAll: () => void;
   snapToGrid: () => void;
@@ -204,6 +267,28 @@ interface EditorState {
   flipNormals: () => void;
   fillHole: () => void;
   subdivide: () => void;
+  loopCut: () => void;
+  updateLoopCutT: (t: number) => void;
+  commitLoopCutPreview: () => void;
+  cancelLoopCutPreview: () => void;
+  mergeCoplanar: () => void;
+  bridgeEdgeLoops: () => void;
+  dissolveEdges: () => void;
+  mergeSelectedVerts: () => void;
+  edgeSlide: () => void;
+  updateEdgeSlideAmount: (amount: number) => void;
+  commitEdgeSlidePreview: () => void;
+  cancelEdgeSlidePreview: () => void;
+  separateSelection: () => void;
+  mirrorSelection: (axis: MirrorAxis) => void;
+  beginMirrorPreview: (axis: MirrorAxis) => void;
+  updateMirrorPreview: (patch: { axis?: MirrorAxis; offset?: number }) => void;
+  commitMirrorPreview: () => void;
+  cancelMirrorPreview: () => void;
+  duplicateSelection: () => void;
+  ripEdges: () => void;
+  originToGeometry: () => void;
+  geometryToOrigin: () => void;
   triangulateFaces: () => void;
   extrudeFaces: () => void;
   bevelEdges: () => void;
@@ -228,6 +313,8 @@ interface EditorState {
   setGroupSel: (i: number) => void;
 
   addMaterial: () => void;
+  duplicateMaterial: (index?: number) => void;
+  removeMaterial: (index?: number) => void;
   editMaterial: () => void;
   assignMaterial: () => void;
   setMaterialName: (name: string) => void;
@@ -235,6 +322,16 @@ interface EditorState {
   pickPaletteColor: (color: string) => void;
   applyMaterialToSelection: (materialIndex?: number) => void;
   setMatSel: (i: number) => void;
+
+  openTextureEditor: () => void;
+  setTextureEditorTool: (tool: 'paint' | 'eyedropper' | 'select' | 'eraser' | 'fill' | 'uv') => void;
+  setTextureBrushSize: (size: number) => void;
+  setTextureBrushColor: (color: string) => void;
+  createMeshTexture: (width: number, height?: number) => void;
+  resizeMeshTexture: (width: number, height: number) => void;
+  commitMeshTexture: (texture: TextureMap) => void;
+  relayoutMeshFaceUvs: () => void;
+  selectFaceFromTexture: (faceIndex: number, additive: boolean) => void;
 
   addBone: () => void;
   deleteBone: () => void;
@@ -267,6 +364,7 @@ interface EditorState {
     sy: number,
     shiftKey: boolean,
     ctrlKey?: boolean,
+    altKey?: boolean,
   ) => void;
   applyBoxSelection: (vpKey: View2DKey, rect: ScreenRect, shiftKey: boolean, ctrlKey?: boolean) => void;
   applyClickSelection3D: (
@@ -276,6 +374,7 @@ interface EditorState {
     sy: number,
     shiftKey: boolean,
     ctrlKey?: boolean,
+    altKey?: boolean,
   ) => void;
   applyBoxSelection3D: (
     camera: THREE.PerspectiveCamera,
@@ -289,7 +388,9 @@ interface EditorState {
   setSelFaces: (s: Set<number>) => void;
   selectedTransformVerts: () => Set<number>;
   setWipFace: (w: number[]) => void;
-  setActiveVP: (vp: View2DKey | '3d') => void;
+  setActiveVP: (vp: ViewportViewId) => void;
+  setActiveSlot: (slot: ViewportSlotId) => void;
+  setViewportSlotView: (slot: ViewportSlotId, view: ViewportViewId) => void;
   setViewportLayout: (layout: ViewportLayoutId) => void;
   toggleViewportMaximize: () => void;
   setVp2d: (key: View2DKey, partial: Partial<Viewport2DState>) => void;
@@ -299,10 +400,40 @@ interface EditorState {
 }
 
 const defaultVp2d = (): Record<View2DKey, Viewport2DState> => ({
-  top: { pan: { x: 240, y: 240 }, zoom: 1 },
-  front: { pan: { x: 240, y: 240 }, zoom: 1 },
-  side: { pan: { x: 240, y: 240 }, zoom: 1 },
+  top: { pan: { x: LEGACY_VIEWPORT_SIZE / 2, y: LEGACY_VIEWPORT_SIZE / 2 }, zoom: 1 },
+  front: { pan: { x: LEGACY_VIEWPORT_SIZE / 2, y: LEGACY_VIEWPORT_SIZE / 2 }, zoom: 1 },
+  side: { pan: { x: LEGACY_VIEWPORT_SIZE / 2, y: LEGACY_VIEWPORT_SIZE / 2 }, zoom: 1 },
 });
+
+function emptyOrthoViewports(sizes = getViewport2DSizes()): Record<View2DKey, Viewport2DState> {
+  return {
+    top: centerOrigin2D(sizes.top.w, sizes.top.h),
+    front: centerOrigin2D(sizes.front.w, sizes.front.h),
+    side: centerOrigin2D(sizes.side.w, sizes.side.h),
+  };
+}
+
+function frame2DForScene(
+  sceneGraph: SceneGraph,
+  meshes: MeshesRecord,
+  mesh: MeshDocument | null,
+  sizes = getViewport2DSizes(),
+): Record<View2DKey, Viewport2DState> {
+  const bounds = sceneWorldBounds(sceneGraph, meshes);
+  if (bounds) return frame2DViewportsFromBounds(bounds, sizes);
+  if (mesh) return frame2DViewports(mesh, sizes);
+  return emptyOrthoViewports(sizes);
+}
+
+let emptyEditTarget: MeshDocument | null = null;
+
+function getEmptyEditTarget(): MeshDocument {
+  if (!emptyEditTarget) {
+    emptyEditTarget = createMeshDocument('Mesh');
+    ensureLayerData(emptyEditTarget);
+  }
+  return emptyEditTarget;
+}
 
 function syncLayerStateFromMesh(mesh: MeshDocument): { layers: LayerState[]; activeLayer: number } {
   ensureLayerData(mesh);
@@ -312,11 +443,40 @@ function syncLayerStateFromMesh(mesh: MeshDocument): { layers: LayerState[]; act
   };
 }
 
+function ensureMeshTextureReady(mesh: MeshDocument): void {
+  if (!mesh.texture) {
+    mesh.texture = createBlankTexture(TEXTURE_DEFAULT_SIZE, TEXTURE_DEFAULT_SIZE);
+    autoLayoutFaceUvs(mesh);
+    return;
+  }
+  ensureFaceUvsArray(mesh);
+  const missing = mesh.faces.some(
+    (f, fi) => f && f.length >= 3 && (!mesh.faceUvs[fi] || Object.keys(mesh.faceUvs[fi]!).length === 0),
+  );
+  if (missing) autoLayoutFaceUvs(mesh);
+}
+
 function commitActiveMesh(mesh: MeshDocument): void {
   useEditorStore.setState((s) => ({
     meshes: { ...s.meshes, [mesh.id]: mesh },
     ...syncLayerStateFromMesh(mesh),
   }));
+}
+
+/** Default startup cube: 10×10×10 world units (2× default snap). */
+const STARTER_BOX_HALF = 5;
+
+function createStarterMesh(name = 'Box'): MeshDocument {
+  const mesh = createMeshDocument(name);
+  ensureLayerData(mesh);
+  const h = STARTER_BOX_HALF;
+  addPrimitiveInBounds(
+    mesh,
+    'box',
+    { min: { x: -h, y: -h, z: -h }, max: { x: h, y: h, z: h } },
+    0,
+  );
+  return mesh;
 }
 
 function createInitialState(): Pick<
@@ -333,16 +493,16 @@ function createInitialState(): Pick<
   | 'layers'
   | 'activeLayer'
 > {
-  const mesh = createMeshDocument();
-  ensureLayerData(mesh);
+  const mesh = createStarterMesh();
   const sceneGraph = new SceneGraph();
   const meshes: MeshesRecord = { [mesh.id]: mesh };
-  addMeshToScene(sceneGraph, meshes, mesh);
+  addMeshToScene(sceneGraph, meshes, mesh, undefined, mesh.name);
   const layerState = syncLayerStateFromMesh(mesh);
+  const nodes = getMeshNodes(sceneGraph);
   return {
     meshes,
     activeMeshId: mesh.id,
-    selectedNodeIds: new Set(),
+    selectedNodeIds: nodes[0] ? new Set([nodes[0].id]) : new Set(),
     sceneGraph,
     history: new CommandHistory(50),
     selVerts: new Set(),
@@ -356,7 +516,8 @@ function createInitialState(): Pick<
 export const useEditorStore = create<EditorState>((set, get) => ({
   ...createInitialState(),
   tool: 'select',
-  selectionMode: 'object',
+  selectionMode: 'face',
+  lastComponentSelectionMode: 'face',
   snapSize: 5,
   snapEnabled: true,
   faceDrawMode: 'tri',
@@ -368,10 +529,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   flatShading: false,
   showGrid3D: true,
   activeVP: 'top',
+  activeSlot: 'top',
+  viewportSlotViews: { ...DEFAULT_VIEWPORT_SLOT_VIEWS },
   maximizedVP: null,
   viewportLayout: 'quad',
   renderTick: 0,
   primDraw: null,
+  knifeDraw: null,
+  lastPrimSizes: {},
+  primChainPlace: false,
+  armedModeling: null,
+  loopCutPreview: null,
+  edgeSlidePreview: null,
+  mirrorPreview: null,
+  textureEditorTool: 'paint',
+  textureBrushSize: 1,
+  textureBrushColor: '#e85a1a',
   modal: null,
   projectFileName: null,
   projectDirty: false,
@@ -386,16 +559,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   applySnapshot: (s) => {
     const sceneGraph = SceneGraph.fromJSON(s.sceneGraph);
     const meshes = cloneMeshesRecord(s.meshes);
-    const activeMeshId = meshes[s.activeMeshId] ? s.activeMeshId : Object.keys(meshes)[0] ?? '';
-    const mesh = meshes[activeMeshId];
+    const activeMeshId = resolveActiveMeshId(meshes, sceneGraph, s.activeMeshId);
+    const mesh = activeMeshId ? meshes[activeMeshId] : null;
     if (mesh) ensureLayerData(mesh);
-    const layerState = mesh ? syncLayerStateFromMesh(mesh) : { layers: [], activeLayer: 0 };
     set({
       meshes,
       activeMeshId,
       selectedNodeIds: new Set(s.selectedNodeIds),
       sceneGraph,
-      ...layerState,
+      ...(mesh ? syncLayerStateFromMesh(mesh) : { layers: [], activeLayer: 0 }),
       selVerts: new Set(),
       selEdges: new Set(),
       selFaces: new Set(),
@@ -404,11 +576,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   getActiveMesh: () => {
-    const { meshes, activeMeshId } = get();
-    const mesh = meshes[activeMeshId];
-    if (!mesh) throw new Error('No active mesh');
-    return mesh;
+    const { meshes, activeMeshId, sceneGraph } = get();
+    if (activeMeshId && meshes[activeMeshId]) return meshes[activeMeshId];
+    const sceneMeshId = getMeshNodes(sceneGraph)[0]?.meshId;
+    if (sceneMeshId && meshes[sceneMeshId]) return meshes[sceneMeshId];
+    return getEmptyEditTarget();
   },
+
+  hasSceneObjects: () => getMeshNodes(get().sceneGraph).length > 0,
 
   setActiveMesh: (meshId) => {
     const mesh = get().meshes[meshId];
@@ -507,12 +682,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const meshes = { ...st.meshes };
       const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
       nodeIds.forEach((id) => removeMeshFromScene(sg, meshes, id));
-      let activeMeshId = st.activeMeshId;
-      if (!meshes[activeMeshId]) {
-        const remaining = getMeshNodes(sg);
-        activeMeshId = remaining[0]?.meshId ?? '';
-      }
-      const mesh = meshes[activeMeshId];
+      const activeMeshId = resolveActiveMeshId(meshes, sg, st.activeMeshId);
+      const mesh = activeMeshId ? meshes[activeMeshId] : null;
       set({
         meshes,
         sceneGraph: sg,
@@ -525,6 +696,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         wipFace: [],
       });
     });
+    const state = get();
+    const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
+    editorEvents.emit('viewport:frame3d', bounds);
+    editorEvents.emit('viewport:frame2d', undefined);
   },
 
   duplicateSelectedObjects: () => {
@@ -597,6 +772,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   notifyChange: (opts) => {
+    if (get().hasSceneObjects()) {
+      const mesh = get().getActiveMesh();
+      if (mesh.texture) layoutMissingFaceUvs(mesh);
+    }
     set((s) => ({
       renderTick: s.renderTick + 1,
       projectDirty: opts?.markDirty === false ? s.projectDirty : true,
@@ -622,9 +801,32 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setTool: (t) => {
-    const { wipFace } = get();
+    const { wipFace, knifeDraw } = get();
     if (wipFace.length > 0) set({ wipFace: [] });
     if (get().primDraw) set({ primDraw: null });
+    if (knifeDraw && t !== 'knife') {
+      if (canCommitKnifeCut(knifeDraw)) {
+        get().commitKnifeCut();
+      } else {
+        set({ knifeDraw: null });
+      }
+    }
+    if (get().loopCutPreview) get().cancelLoopCutPreview();
+    if (get().edgeSlidePreview) get().cancelEdgeSlidePreview();
+    if (get().mirrorPreview) get().cancelMirrorPreview();
+    if (t === 'knife' && get().selectionMode === 'object') {
+      const mode = get().lastComponentSelectionMode;
+      set({
+        selectionMode: mode,
+        lastComponentSelectionMode: mode,
+        selectedNodeIds: new Set(),
+        selVerts: new Set(),
+        selEdges: new Set(),
+        selFaces: new Set(),
+        wipFace: [],
+      });
+      editorEvents.emit('selection:changed', undefined);
+    }
     set({ tool: t });
     if ((t === 'extrude' || t === 'inset') && get().selectionMode !== 'face') get().setSelectionMode('face');
     else if (t === 'bevel' && get().selectionMode !== 'edge') get().setSelectionMode('edge');
@@ -640,14 +842,57 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setFillHoleDoubleSided: (fillHoleDoubleSided) => set({ fillHoleDoubleSided }),
 
   setSelectionMode: (selectionMode) => {
+    if (selectionMode === 'object' && get().knifeDraw) {
+      get().cancelKnifeDraw();
+    }
     const mode = effectiveSelectionMode(get().tool, selectionMode);
     let tool = get().tool;
     if (mode === 'face' && (tool === 'face' || tool === 'vertex')) tool = 'select';
     if (mode === 'edge' && tool === 'vertex') tool = 'select';
     if (mode === 'vertex' && tool === 'face') tool = 'select';
-    set({
+    const patch: Partial<EditorState> = {
       selectionMode: mode,
       tool,
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: new Set(),
+      wipFace: [],
+    };
+    if (mode !== 'object') {
+      patch.lastComponentSelectionMode = mode;
+    }
+    set(patch);
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  toggleObjectEditMode: () => {
+    const { selectionMode, lastComponentSelectionMode } = get();
+    if (selectionMode === 'object') {
+      get().enterMeshEditMode(lastComponentSelectionMode);
+      return;
+    }
+    if (get().knifeDraw) get().cancelKnifeDraw();
+    set({
+      selectionMode: 'object',
+      tool: 'select',
+      selVerts: new Set(),
+      selEdges: new Set(),
+      selFaces: new Set(),
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  enterMeshEditMode: (mode) => {
+    if (get().knifeDraw) get().cancelKnifeDraw();
+    const next = mode ?? get().lastComponentSelectionMode;
+    set({
+      selectionMode: next,
+      lastComponentSelectionMode: next,
+      tool: 'select',
+      selectedNodeIds: new Set(),
       selVerts: new Set(),
       selEdges: new Set(),
       selFaces: new Set(),
@@ -687,7 +932,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       primDraw: null,
       groupSel: 0,
       matSel: 0,
-      selectionMode: 'object',
+      tool: 'select',
+      selectionMode: 'face',
+      lastComponentSelectionMode: 'face',
       vp2d: defaultVp2d(),
       projectFileName: null,
       projectDirty: false,
@@ -796,9 +1043,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   saveProject: async () => {
     const state = get();
+    const sceneMeshes = meshesInScene(state.meshes, state.sceneGraph);
+    const sceneIds = new Set(sceneMeshes.map((m) => m.id));
+    const activeMeshId = sceneIds.has(state.activeMeshId)
+      ? state.activeMeshId
+      : sceneMeshes[0]?.id ?? '';
     const json = serializeProject({
-      meshes: meshesToArray(state.meshes),
-      activeMeshId: state.activeMeshId,
+      meshes: sceneMeshes.map((m) => cloneMeshDocument(m)),
+      activeMeshId,
       sceneGraph: state.sceneGraph.toJSON(),
       editor: {
         vp2d: state.vp2d,
@@ -812,7 +1064,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         matSel: state.matSel,
       },
     });
-    const name = state.projectFileName ?? defaultProjectName(state.getActiveMesh().name);
+    const name = state.projectFileName ?? defaultProjectName(
+      meshesInScene(state.meshes, state.sceneGraph)[0]?.name ?? 'Scene',
+    );
     const usedPicker = await saveTextWithPicker(
       json,
       name,
@@ -835,14 +1089,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   centerAllViews: () => {
     const state = get();
     const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
-    const mesh = state.getActiveMesh();
+    const sizes = getViewport2DSizes();
     set((s) => ({
       maximizedVP: null,
       viewportLayout: 'quad',
-      vp2d: bounds ? frame2DViewportsFromBounds(bounds) : frame2DViewports(mesh),
+      vp2d: frame2DForScene(state.sceneGraph, state.meshes, state.getActiveMesh(), sizes),
       renderTick: s.renderTick + 1,
     }));
     editorEvents.emit('viewport:frame3d', bounds);
+    editorEvents.emit('viewport:frame2d', undefined);
     editorEvents.emit('viewport:render', undefined);
   },
 
@@ -854,6 +1109,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get().notifyChange();
       return;
     }
+    if (!get().hasSceneObjects()) return;
     const mesh = get().getActiveMesh();
     const visibleVerts = visibleVertexIndices(mesh);
     const visibleFaces = visibleFaceIndices(mesh);
@@ -887,6 +1143,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get().notifyChange();
       return;
     }
+    if (!get().hasSceneObjects()) return;
     const mesh = get().getActiveMesh();
     const visibleVerts = visibleVertexIndices(mesh);
     const visibleFaces = visibleFaceIndices(mesh);
@@ -908,6 +1165,80 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().notifyChange();
   },
 
+  selectLinked: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    if (!state.hasSceneObjects()) return;
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
+    const result = selectLinkedComponents(
+      mesh,
+      state.selectionMode,
+      state.selVerts,
+      state.selEdges,
+      state.selFaces,
+      visibleVerts,
+      visibleFaces,
+    );
+    set({
+      selVerts: result.selVerts,
+      selEdges: result.selEdges,
+      selFaces: result.selFaces,
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  growSelection: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    if (!state.hasSceneObjects()) return;
+    const mesh = state.getActiveMesh();
+    const visibleVerts = visibleVertexIndices(mesh);
+    const visibleFaces = visibleFaceIndices(mesh);
+    const result = growSelectionComponents(
+      mesh,
+      state.selectionMode,
+      state.selVerts,
+      state.selEdges,
+      state.selFaces,
+      visibleVerts,
+      visibleFaces,
+    );
+    set({
+      selVerts: result.selVerts,
+      selEdges: result.selEdges,
+      selFaces: result.selFaces,
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
+  shrinkSelection: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    if (!state.hasSceneObjects()) return;
+    const mesh = state.getActiveMesh();
+    const result = shrinkSelectionComponents(
+      mesh,
+      state.selectionMode,
+      state.selVerts,
+      state.selEdges,
+      state.selFaces,
+    );
+    set({
+      selVerts: result.selVerts,
+      selEdges: result.selEdges,
+      selFaces: result.selFaces,
+      wipFace: [],
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+
   deleteSelected: () => {
     const state = get();
     const mode = effectiveSelectionMode(state.tool, state.selectionMode);
@@ -915,6 +1246,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       state.deleteSelectedObjects();
       return;
     }
+    if (!state.hasSceneObjects()) return;
     const mesh = state.getActiveMesh();
     const targets = getDeleteTargets(mesh, mode, state.selVerts, state.selEdges, state.selFaces);
     if (!hasDeletableSelection(targets)) return;
@@ -945,13 +1277,47 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().notifyChange();
   },
 
+  setPrimChainPlace: (enabled) => {
+    set({ primChainPlace: enabled });
+    get().notifyChange();
+  },
+
+  armModeling: (kind) => {
+    if (kind === 'extrude') {
+      set({ armedModeling: kind, tool: 'extrude', selectionMode: 'face' });
+    } else {
+      set({ armedModeling: kind, tool: 'bevel', selectionMode: 'edge' });
+    }
+    get().notifyChange();
+  },
+
+  clearArmedModeling: () => {
+    if (get().loopCutPreview) {
+      get().cancelLoopCutPreview();
+      return;
+    }
+    if (get().edgeSlidePreview) {
+      get().cancelEdgeSlidePreview();
+      return;
+    }
+    if (get().mirrorPreview) {
+      get().cancelMirrorPreview();
+      return;
+    }
+    if (get().armedModeling) {
+      set({ armedModeling: null });
+      get().notifyChange();
+    }
+  },
+
   commitPrimDraw: () => {
-    const { primDraw, snapSize } = get();
+    const { primDraw, snapSize, primChainPlace } = get();
     if (!primDraw || !canCommitPrimDraw(primDraw, snapSize)) return;
 
     const type = primDraw.type;
     const baseView = primDraw.baseView;
     const bounds = enforceMinSize(primDraw.bounds, snapSize);
+    const savedSize = boundsToPrimSize(bounds);
     const label = type.charAt(0).toUpperCase() + type.slice(1);
 
     get().runCommand(`Add ${label}`, () => {
@@ -964,17 +1330,74 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const sg = SceneGraph.fromJSON(st.sceneGraph.toJSON());
       const { nodeId, meshId } = addMeshToScene(sg, newMeshes, mesh, { position: worldCenter }, name);
       set({
-        primDraw: null,
+        primDraw: primChainPlace ? createPrimDrawState(type) : null,
+        lastPrimSizes: { ...st.lastPrimSizes, [type]: savedSize },
         meshes: newMeshes,
         sceneGraph: sg,
         activeMeshId: meshId,
-        selectedNodeIds: new Set([nodeId]),
+        selectedNodeIds: primChainPlace ? new Set() : new Set([nodeId]),
         ...syncLayerStateFromMesh(mesh),
         selVerts: new Set(),
         selEdges: new Set(),
         selFaces: new Set(),
+        ...(primChainPlace
+          ? { selectionMode: 'object' as const, tool: 'select' as const }
+          : {
+              selectionMode: 'face' as const,
+              lastComponentSelectionMode: 'face' as const,
+              tool: 'select' as const,
+            }),
       });
     });
+    get().notifyChange();
+  },
+
+  setKnifeDraw: (draw) => {
+    set({ knifeDraw: draw });
+    get().notifyChange();
+  },
+
+  undoKnifePoint: () => {
+    const draw = get().knifeDraw;
+    if (!draw || draw.points.length === 0) return;
+    set({ knifeDraw: popKnifePoint(draw) });
+    get().notifyChange();
+  },
+
+  cancelKnifeDraw: () => {
+    set({ knifeDraw: null });
+    get().notifyChange();
+  },
+
+  activateKnifeTool: (restart = true) => {
+    if (restart && get().knifeDraw) {
+      get().cancelKnifeDraw();
+    }
+    if (get().selectionMode === 'object') {
+      const mode = get().lastComponentSelectionMode;
+      set({
+        selectionMode: mode,
+        lastComponentSelectionMode: mode,
+        selectedNodeIds: new Set(),
+        selVerts: new Set(),
+        selEdges: new Set(),
+        selFaces: new Set(),
+        wipFace: [],
+      });
+      editorEvents.emit('selection:changed', undefined);
+    }
+    get().setTool('knife');
+  },
+
+  commitKnifeCut: () => {
+    const { knifeDraw } = get();
+    if (!knifeDraw || !canCommitKnifeCut(knifeDraw)) return;
+    get().runCommand('Knife', () => {
+      const mesh = get().getActiveMesh();
+      meshOps.knifeSurfacePathMesh(mesh, knifeDraw.points);
+    });
+    set({ knifeDraw: null, selVerts: new Set(), selEdges: new Set(), selFaces: new Set() });
+    editorEvents.emit('selection:changed', undefined);
     get().notifyChange();
   },
 
@@ -1005,6 +1428,312 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   subdivide: () => get().runCommand('Subdivide', () => meshOps.subdivide(get().getActiveMesh(), get().selFaces, get().groupSel)),
+  loopCut: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    let edges = state.selEdges;
+    if (edges.size === 0) return;
+    if (edges.size === 1) {
+      edges = selectEdgeLoop(state.getActiveMesh(), [...edges][0]);
+    }
+    const beforeSnapshot = state.getSnapshot();
+    set({
+      loopCutPreview: { edges: [...edges], beforeSnapshot, t: 0.5 },
+      armedModeling: 'loopcut',
+      selectionMode: 'edge',
+      tool: 'select',
+    });
+    get().updateLoopCutT(0.5);
+  },
+  updateLoopCutT: (t) => {
+    const preview = get().loopCutPreview;
+    if (!preview) return;
+    const clamped = Math.min(0.95, Math.max(0.05, t));
+    get().applySnapshot(preview.beforeSnapshot);
+    const newLoop = meshOps.loopCutEdges(get().getActiveMesh(), new Set(preview.edges), clamped);
+    set({
+      loopCutPreview: { ...preview, t: clamped },
+      selEdges: newLoop,
+      selVerts: new Set(),
+      selFaces: new Set(),
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  commitLoopCutPreview: () => {
+    const preview = get().loopCutPreview;
+    if (!preview) return;
+    const before = preview.beforeSnapshot;
+    const after = get().getSnapshot();
+    const cmd = new SnapshotCommand('Loop Cut', before, after, (snap) => {
+      get().applySnapshot(snap);
+      get().notifyChange();
+    });
+    get().history.execute(cmd);
+    set({ loopCutPreview: null, armedModeling: null });
+    get().notifyChange();
+  },
+  cancelLoopCutPreview: () => {
+    const preview = get().loopCutPreview;
+    if (!preview) return;
+    get().applySnapshot(preview.beforeSnapshot);
+    set({
+      loopCutPreview: null,
+      armedModeling: null,
+      selEdges: new Set(preview.edges),
+      selVerts: new Set(),
+      selFaces: new Set(),
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  mergeCoplanar: () => {
+    const selFaces = get().selFaces;
+    if (selFaces.size < 2) return;
+    get().runCommand('Merge Coplanar', () => {
+      const merged = meshOps.mergeCoplanarFaces(get().getActiveMesh(), selFaces);
+      if (merged.length > 0) {
+        set({ selFaces: new Set(merged), selVerts: new Set(), selEdges: new Set() });
+        editorEvents.emit('selection:changed', undefined);
+      }
+    });
+    get().notifyChange();
+  },
+  bridgeEdgeLoops: () => {
+    const selEdges = get().selEdges;
+    if (selEdges.size < 6) return;
+    get().runCommand('Bridge Loops', () => {
+      const created = meshOps.bridgeEdgeLoops(get().getActiveMesh(), selEdges, get().groupSel);
+      if (created && created.length > 0) {
+        set({
+          selFaces: new Set(created),
+          selEdges: new Set(),
+          selVerts: new Set(),
+        });
+        editorEvents.emit('selection:changed', undefined);
+      }
+    });
+    get().notifyChange();
+  },
+  dissolveEdges: () => {
+    const selEdges = get().selEdges;
+    if (selEdges.size === 0) return;
+    get().runCommand('Dissolve Edges', () => {
+      meshOps.dissolveEdges(get().getActiveMesh(), selEdges);
+    });
+    set({ selEdges: new Set(), selVerts: new Set(), selFaces: new Set() });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  mergeSelectedVerts: () => {
+    const selVerts = get().selVerts;
+    if (selVerts.size < 2) return;
+    get().runCommand('Merge Vertices', () => {
+      const merged = meshOps.mergeSelectedVertices(get().getActiveMesh(), selVerts);
+      if (merged !== null) {
+        set({ selVerts: new Set([merged]), selEdges: new Set(), selFaces: new Set() });
+        editorEvents.emit('selection:changed', undefined);
+      }
+    });
+    get().notifyChange();
+  },
+  edgeSlide: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    let edges = state.selEdges;
+    if (edges.size === 0) return;
+    if (edges.size === 1) {
+      edges = selectEdgeLoop(state.getActiveMesh(), [...edges][0]);
+    }
+    const beforeSnapshot = state.getSnapshot();
+    set({
+      edgeSlidePreview: { edges: [...edges], beforeSnapshot, amount: 0 },
+      armedModeling: 'edgeslide',
+      selectionMode: 'edge',
+      tool: 'select',
+    });
+    get().notifyChange();
+  },
+  updateEdgeSlideAmount: (amount) => {
+    const preview = get().edgeSlidePreview;
+    if (!preview) return;
+    get().applySnapshot(preview.beforeSnapshot);
+    meshOps.edgeSlide(get().getActiveMesh(), new Set(preview.edges), amount);
+    set({ edgeSlidePreview: { ...preview, amount } });
+    get().notifyChange();
+  },
+  commitEdgeSlidePreview: () => {
+    const preview = get().edgeSlidePreview;
+    if (!preview) return;
+    const before = preview.beforeSnapshot;
+    const after = get().getSnapshot();
+    const cmd = new SnapshotCommand('Edge Slide', before, after, (snap) => {
+      get().applySnapshot(snap);
+      get().notifyChange();
+    });
+    get().history.execute(cmd);
+    set({ edgeSlidePreview: null, armedModeling: null, selEdges: new Set(preview.edges) });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  cancelEdgeSlidePreview: () => {
+    const preview = get().edgeSlidePreview;
+    if (!preview) return;
+    get().applySnapshot(preview.beforeSnapshot);
+    set({
+      edgeSlidePreview: null,
+      armedModeling: null,
+      selEdges: new Set(preview.edges),
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  separateSelection: () => {
+    const selFaces = get().selFaces;
+    if (selFaces.size === 0) return;
+    get().runCommand('Separate', () => {
+      const split = meshOps.separateFaces(get().getActiveMesh(), selFaces);
+      if (split === 0) return;
+    });
+    get().notifyChange();
+  },
+  mirrorSelection: (axis) => {
+    get().beginMirrorPreview(axis);
+  },
+  beginMirrorPreview: (axis: MirrorAxis) => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    const mesh = state.getActiveMesh();
+    const sourceFaceIndices = resolveMirrorSourceFaces(mesh, state.selFaces);
+    if (sourceFaceIndices.length === 0) return;
+    const beforeSnapshot = state.getSnapshot();
+    set({
+      mirrorPreview: { axis, beforeSnapshot, offset: 0, sourceFaceIndices },
+      armedModeling: 'mirror',
+      tool: 'select',
+    });
+    get().updateMirrorPreview({ offset: 0 });
+  },
+  updateMirrorPreview: (patch) => {
+    const preview = get().mirrorPreview;
+    if (!preview) return;
+    const axis = patch.axis ?? preview.axis;
+    const offset = patch.offset ?? preview.offset;
+    get().applySnapshot(preview.beforeSnapshot);
+    const created = meshOps.mirrorGeometry(
+      get().getActiveMesh(),
+      preview.sourceFaceIndices,
+      axis,
+      get().groupSel,
+      offset,
+    );
+    set({
+      mirrorPreview: { ...preview, axis, offset },
+      selFaces: new Set(created),
+      selEdges: new Set(),
+      selVerts: new Set(),
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  commitMirrorPreview: () => {
+    const preview = get().mirrorPreview;
+    if (!preview) return;
+    const before = preview.beforeSnapshot;
+    const after = get().getSnapshot();
+    const cmd = new SnapshotCommand(`Mirror ${preview.axis.toUpperCase()}`, before, after, (snap) => {
+      get().applySnapshot(snap);
+      get().notifyChange();
+    });
+    get().history.execute(cmd);
+    set({ mirrorPreview: null, armedModeling: null });
+    get().notifyChange();
+  },
+  cancelMirrorPreview: () => {
+    const preview = get().mirrorPreview;
+    if (!preview) return;
+    get().applySnapshot(preview.beforeSnapshot);
+    set({
+      mirrorPreview: null,
+      armedModeling: null,
+      selFaces: new Set(preview.sourceFaceIndices),
+      selEdges: new Set(),
+      selVerts: new Set(),
+    });
+    editorEvents.emit('selection:changed', undefined);
+    get().notifyChange();
+  },
+  duplicateSelection: () => {
+    const state = get();
+    if (state.selectionMode === 'object') return;
+    const selectionMode = state.selectionMode;
+    const offset = { x: state.snapSize, y: 0, z: 0 };
+    get().runCommand('Duplicate', () => {
+      const result = meshOps.duplicateSelection(
+        state.getActiveMesh(),
+        selectionMode,
+        state.selVerts,
+        state.selEdges,
+        state.selFaces,
+        state.groupSel,
+        offset,
+      );
+      if (result) {
+        set({
+          selVerts: result.selVerts,
+          selEdges: result.selEdges,
+          selFaces: result.selFaces,
+        });
+        editorEvents.emit('selection:changed', undefined);
+      }
+    });
+    get().notifyChange();
+  },
+  ripEdges: () => {
+    const selEdges = get().selEdges;
+    if (selEdges.size === 0) return;
+    get().runCommand('Rip Edges', () => {
+      const count = meshOps.ripEdges(get().getActiveMesh(), selEdges);
+      if (count === 0) return;
+    });
+    get().notifyChange();
+  },
+  originToGeometry: () => {
+    const state = get();
+    const nodeIds = [...state.selectedNodeIds].filter(
+      (id) => state.sceneGraph.getNode(id)?.type === 'mesh',
+    );
+    if (nodeIds.length === 0) return;
+    get().runCommand('Origin to Geometry', () => {
+      const st = get();
+      nodeIds.forEach((nodeId) => {
+        const node = st.sceneGraph.getNode(nodeId);
+        if (!node?.meshId) return;
+        const mesh = st.meshes[node.meshId];
+        if (!mesh) return;
+        originToGeometryImpl(mesh, node.transform);
+      });
+    });
+    get().notifyChange();
+  },
+  geometryToOrigin: () => {
+    const state = get();
+    const nodeIds = [...state.selectedNodeIds].filter(
+      (id) => state.sceneGraph.getNode(id)?.type === 'mesh',
+    );
+    if (nodeIds.length === 0) return;
+    get().runCommand('Geometry to Origin', () => {
+      const st = get();
+      nodeIds.forEach((nodeId) => {
+        const node = st.sceneGraph.getNode(nodeId);
+        if (!node?.meshId) return;
+        const mesh = st.meshes[node.meshId];
+        if (!mesh) return;
+        geometryToOriginImpl(mesh, node.transform);
+      });
+    });
+    get().notifyChange();
+  },
   triangulateFaces: () =>
     get().runCommand('Triangulate', () => meshOps.triangulate(get().getActiveMesh(), get().selFaces, get().groupSel)),
   extrudeFaces: () =>
@@ -1134,12 +1863,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   frameAll: () => {
     const state = get();
     const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
-    const mesh = state.getActiveMesh();
+    const sizes = getViewport2DSizes();
     set((s) => ({
-      vp2d: bounds ? frame2DViewportsFromBounds(bounds) : frame2DViewports(mesh),
+      vp2d: frame2DForScene(state.sceneGraph, state.meshes, state.getActiveMesh(), sizes),
       renderTick: s.renderTick + 1,
     }));
     editorEvents.emit('viewport:frame3d', bounds);
+    editorEvents.emit('viewport:frame2d', undefined);
     editorEvents.emit('viewport:render', undefined);
   },
 
@@ -1197,6 +1927,31 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       opacity: 0.9,
     });
     set({ matSel: mesh.materials.length - 1 });
+    get().notifyChange();
+  },
+
+  duplicateMaterial: (index) => {
+    const mesh = get().getActiveMesh();
+    const idx = index ?? get().matSel;
+    const src = mesh.materials[idx];
+    if (!src) return;
+    mesh.materials.push({
+      name: `${src.name} copy`,
+      color: src.color,
+      opacity: src.opacity,
+    });
+    set({ matSel: mesh.materials.length - 1 });
+    get().notifyChange();
+  },
+
+  removeMaterial: (index) => {
+    const mesh = get().getActiveMesh();
+    if (mesh.materials.length <= 1) return;
+    const idx = index ?? get().matSel;
+    if (idx < 0 || idx >= mesh.materials.length) return;
+    mesh.materials.splice(idx, 1);
+    const { matSel } = get();
+    set({ matSel: matSel >= mesh.materials.length ? mesh.materials.length - 1 : matSel > idx ? matSel - 1 : matSel });
     get().notifyChange();
   },
 
@@ -1266,6 +2021,75 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setMatSel: (i) => set({ matSel: i }),
+
+  openTextureEditor: () => {
+    const mesh = get().getActiveMesh();
+    get().runCommand('Texture View', () => ensureMeshTextureReady(mesh));
+    get().setViewportSlotView(get().activeSlot, 'texture');
+    set({ selectionMode: 'face', tool: 'select', textureEditorTool: 'paint' });
+    get().notifyChange();
+    get().bumpRender();
+  },
+
+  setTextureEditorTool: (tool) => set({ textureEditorTool: tool }),
+
+  setTextureBrushSize: (size) => set({ textureBrushSize: Math.max(1, Math.min(32, size)) }),
+
+  setTextureBrushColor: (color) => set({ textureBrushColor: color }),
+
+  createMeshTexture: (width, height) => {
+    const w = Math.max(1, Math.min(2048, Math.round(width)));
+    const h = Math.max(1, Math.min(2048, Math.round(height ?? width)));
+    get().runCommand('Create Texture', () => {
+      const mesh = get().getActiveMesh();
+      mesh.texture = createBlankTexture(w, h);
+      autoLayoutFaceUvs(mesh);
+    });
+    get().notifyChange();
+    get().bumpRender();
+  },
+
+  resizeMeshTexture: (width, height) => {
+    const mesh = get().getActiveMesh();
+    if (!mesh.texture) return;
+    const w = Math.max(1, Math.min(2048, Math.round(width)));
+    const h = Math.max(1, Math.min(2048, Math.round(height)));
+    void resizeTextureMapAsync(mesh.texture, w, h).then((next) => {
+      get().runCommand('Resize Texture', () => {
+        get().getActiveMesh().texture = next;
+        autoLayoutFaceUvs(get().getActiveMesh());
+      });
+      get().bumpRender();
+    });
+  },
+
+  commitMeshTexture: (texture) => {
+    const mesh = get().getActiveMesh();
+    mesh.texture = texture;
+    commitActiveMesh(mesh);
+    get().notifyChange();
+    get().bumpRender();
+  },
+
+  relayoutMeshFaceUvs: () => {
+    get().runCommand('Relayout UVs', () => {
+      autoLayoutFaceUvs(get().getActiveMesh());
+    });
+    get().notifyChange();
+    get().bumpRender();
+  },
+
+  selectFaceFromTexture: (faceIndex, additive) => {
+    const next = additive ? new Set(get().selFaces) : new Set<number>();
+    if (additive) {
+      if (next.has(faceIndex)) next.delete(faceIndex);
+      else next.add(faceIndex);
+    } else {
+      next.add(faceIndex);
+    }
+    set({ selFaces: next, selectionMode: 'face' });
+    editorEvents.emit('selection:changed', undefined);
+  },
 
   addBone: () => {
     const mesh = get().getActiveMesh();
@@ -1419,19 +2243,32 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (i < get().layers.length - 1) get().reorderLayer(i, i + 1);
   },
 
-  exportOBJ: () => exportOBJ(get().getActiveMesh()),
-  exportSTL: () => exportSTL(get().getActiveMesh()),
-  exportPLY: () => exportPLY(get().getActiveMesh()),
-  exportGLTF: () => exportGLTF(get().getActiveMesh()),
+  exportOBJ: () => {
+    if (!get().hasSceneObjects()) return;
+    exportOBJ(get().getActiveMesh());
+  },
+  exportSTL: () => {
+    if (!get().hasSceneObjects()) return;
+    exportSTL(get().getActiveMesh());
+  },
+  exportPLY: () => {
+    if (!get().hasSceneObjects()) return;
+    exportPLY(get().getActiveMesh());
+  },
+  exportGLTF: () => {
+    if (!get().hasSceneObjects()) return;
+    exportGLTF(get().getActiveMesh());
+  },
 
   showModal: (modal) => set({ modal: { ...modal, open: true } }),
   closeModal: () => set({ modal: null }),
 
-  applyClickSelection: (vpKey, sx, sy, shiftKey, ctrlKey = false) => {
+  applyClickSelection: (vpKey, sx, sy, shiftKey, ctrlKey = false, altKey = false) => {
     const state = get();
-    const mesh = state.getActiveMesh();
-    const visibleVerts = visibleVertexIndices(mesh);
-    const visibleFaces = visibleFaceIndices(mesh);
+    const mesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+    if (!mesh) return;
+    const visibleVerts = visibleVertexIndices(state.getActiveMesh());
+    const visibleFaces = visibleFaceIndices(state.getActiveMesh());
     const result = applyClickSelection2D({
       mesh,
       vpKey,
@@ -1444,6 +2281,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selFaces: state.selFaces,
       shiftKey,
       ctrlKey,
+      altKey,
       visibleVerts,
       visibleFaces,
     });
@@ -1458,9 +2296,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyBoxSelection: (vpKey, rect, shiftKey, ctrlKey = false) => {
     const state = get();
-    const mesh = state.getActiveMesh();
-    const visibleVerts = visibleVertexIndices(mesh);
-    const visibleFaces = visibleFaceIndices(mesh);
+    const mesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+    if (!mesh) return;
+    const visibleVerts = visibleVertexIndices(state.getActiveMesh());
+    const visibleFaces = visibleFaceIndices(state.getActiveMesh());
     const result = boxSelect2D({
       mesh,
       vpKey,
@@ -1484,11 +2323,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().notifyChange();
   },
 
-  applyClickSelection3D: (camera, canvas, sx, sy, shiftKey, ctrlKey = false) => {
+  applyClickSelection3D: (camera, canvas, sx, sy, shiftKey, ctrlKey = false, altKey = false) => {
     const state = get();
-    const mesh = state.getActiveMesh();
-    const visibleVerts = visibleVertexIndices(mesh);
-    const visibleFaces = visibleFaceIndices(mesh);
+    const mesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+    if (!mesh) return;
+    const visibleVerts = visibleVertexIndices(state.getActiveMesh());
+    const visibleFaces = visibleFaceIndices(state.getActiveMesh());
     const result = applyClickSelection3D({
       mesh,
       camera,
@@ -1501,6 +2341,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selFaces: state.selFaces,
       shiftKey,
       ctrlKey,
+      altKey,
       visibleVerts,
       visibleFaces,
     });
@@ -1515,9 +2356,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyBoxSelection3D: (camera, canvas, rect, shiftKey, ctrlKey = false) => {
     const state = get();
-    const mesh = state.getActiveMesh();
-    const visibleVerts = visibleVertexIndices(mesh);
-    const visibleFaces = visibleFaceIndices(mesh);
+    const mesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+    if (!mesh) return;
+    const visibleVerts = visibleVertexIndices(state.getActiveMesh());
+    const visibleFaces = visibleFaceIndices(state.getActiveMesh());
     const result = boxSelect3D({
       mesh,
       camera,
@@ -1575,7 +2417,47 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ wipFace: w });
     get().notifyChange();
   },
-  setActiveVP: (vp) => set({ activeVP: vp }),
+  setActiveVP: (vp) => {
+    const slotViews = get().viewportSlotViews;
+    const slot = (Object.entries(slotViews) as [ViewportSlotId, ViewportViewId][]).find(
+      ([, view]) => view === vp,
+    )?.[0];
+    if (slot) set({ activeVP: vp, activeSlot: slot });
+    else set({ activeVP: vp });
+  },
+  setActiveSlot: (slot) => {
+    const view = get().viewportSlotViews[slot];
+    set({ activeSlot: slot, activeVP: view });
+  },
+  setViewportSlotView: (slot, view) => {
+    if (view === 'texture') {
+      ensureMeshTextureReady(get().getActiveMesh());
+    }
+    const current = { ...get().viewportSlotViews };
+    if (current[slot] === view) return;
+    const otherSlot = (Object.keys(current) as ViewportSlotId[]).find((s) => s !== slot && current[s] === view);
+    const prevView = current[slot];
+    if (otherSlot) current[otherSlot] = prevView;
+    current[slot] = view;
+    const { activeSlot } = get();
+    const patch: Partial<EditorState> = {
+      viewportSlotViews: current,
+      renderTick: get().renderTick + 1,
+    };
+    if (activeSlot === slot) {
+      patch.activeVP = view;
+      if (view === 'texture') {
+        patch.selectionMode = 'face';
+        patch.tool = 'select';
+        patch.textureEditorTool = 'paint';
+      }
+    } else if (otherSlot && activeSlot === otherSlot) {
+      patch.activeVP = prevView;
+    }
+    set(patch);
+    get().notifyChange();
+    requestAnimationFrame(() => editorEvents.emit('viewport:render', undefined));
+  },
   setViewportLayout: (viewportLayout) => {
     set({ viewportLayout, maximizedVP: null, renderTick: get().renderTick + 1 });
     get().notifyChange();
@@ -1583,7 +2465,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   toggleViewportMaximize: () => {
     const state = get();
-    const next = state.maximizedVP ? null : state.activeVP;
+    const next = state.maximizedVP ? null : state.activeSlot;
     set({ maximizedVP: next, renderTick: state.renderTick + 1 });
     get().notifyChange();
     const refresh = () => {

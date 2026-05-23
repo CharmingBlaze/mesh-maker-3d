@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import { useEditorStore } from '@/store/editorStore';
 import { getMeshNodes } from '@/systems/scene/sceneObjectHelpers';
 import { useSceneRevision } from '@/hooks/useSceneRevision';
 
-/** Layer scenes — placed objects in the level (formerly the Scene outliner). */
+/** Scene objects — each mesh in the level. */
 export function LayersPanel() {
   useSceneRevision();
   const sceneGraph = useEditorStore((s) => s.sceneGraph);
@@ -10,105 +11,128 @@ export function LayersPanel() {
   const activeMeshId = useEditorStore((s) => s.activeMeshId);
   const selectSceneNode = useEditorStore((s) => s.selectSceneNode);
   const setActiveMesh = useEditorStore((s) => s.setActiveMesh);
+  const enterMeshEditMode = useEditorStore((s) => s.enterMeshEditMode);
   const deleteSelectedObjects = useEditorStore((s) => s.deleteSelectedObjects);
   const duplicateSelectedObjects = useEditorStore((s) => s.duplicateSelectedObjects);
   const toggleSceneNodeVisible = useEditorStore((s) => s.toggleSceneNodeVisible);
   const toggleSceneNodeLocked = useEditorStore((s) => s.toggleSceneNodeLocked);
   const renameSceneNode = useEditorStore((s) => s.renameSceneNode);
-  const showModal = useEditorStore((s) => s.showModal);
 
-  const layerScenes = getMeshNodes(sceneGraph);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
 
-  const handleRename = (nodeId: string, currentName: string) => {
-    showModal({
-      title: 'Rename Layer Scene',
-      fields: [{ id: 'name', label: 'Name', type: 'text', value: currentName }],
-      onConfirm: (vals) => renameSceneNode(nodeId, vals.name),
-    });
+  const objects = getMeshNodes(sceneGraph);
+  const hasSelection = selectedNodeIds.size > 0;
+
+  const startRename = (nodeId: string, currentName: string) => {
+    setEditingId(nodeId);
+    setEditName(currentName);
   };
 
+  const commitRename = (nodeId: string) => {
+    const trimmed = editName.trim();
+    if (trimmed) renameSceneNode(nodeId, trimmed);
+    setEditingId(null);
+  };
+
+  const cancelRename = () => setEditingId(null);
+
   return (
-    <div className="ms-layers-tab">
-      <div className="ms-layers-toolbar">
+    <div className="lp-tab">
+      <div className="lp-toolbar">
         <button
           type="button"
-          className="ms-btn ms-layer-tb-btn"
+          className="lp-tool-btn"
           onClick={() => duplicateSelectedObjects()}
-          disabled={selectedNodeIds.size === 0}
-          title="Duplicate selected layer scenes (Ctrl+D)"
+          disabled={!hasSelection}
+          title="Duplicate selected (Ctrl+D)"
         >
           Duplicate
         </button>
         <button
           type="button"
-          className="ms-btn ms-layer-tb-btn"
+          className="lp-tool-btn lp-tool-btn--danger"
           onClick={() => deleteSelectedObjects()}
-          disabled={selectedNodeIds.size === 0}
-          title="Delete selected layer scenes"
+          disabled={!hasSelection}
+          title="Delete selected"
         >
           Delete
         </button>
       </div>
 
-      <div className="ms-layer-list" role="list">
-        {layerScenes.length === 0 ? (
-          <div className="ms-empty">No layer scenes — draw a shape to add one</div>
+      <div className="lp-list" role="list">
+        {objects.length === 0 ? (
+          <div className="lp-empty">No objects yet — add a primitive or import a mesh.</div>
         ) : (
-          layerScenes.map((node) => {
+          objects.map((node) => {
             const selected = selectedNodeIds.has(node.id);
             const isActive = node.meshId === activeMeshId;
             return (
               <div
                 key={node.id}
                 role="listitem"
-                className={`ms-layer-row ms-layer-scene-row ${selected ? 'active' : ''} ${isActive ? 'editing' : ''}`}
+                className={`lp-row ${selected ? 'selected' : ''} ${isActive ? 'active-mesh' : ''}`}
                 onClick={() => selectSceneNode(node.id)}
-                onDoubleClick={() => node.meshId && setActiveMesh(node.meshId)}
-                title="Click to select · Double-click to edit mesh"
+                onDoubleClick={() => {
+                  if (node.meshId) {
+                    setActiveMesh(node.meshId);
+                    enterMeshEditMode('face');
+                  }
+                }}
+                title="Click to select · Double-click row to edit geometry · Double-click name to rename"
               >
-                <div className="ms-layer-main">
-                  <span className="ms-layer-name" title={node.name}>
+                <span className="lp-row-indicator" aria-hidden />
+                {editingId === node.id ? (
+                  <input
+                    className="lp-row-name-input"
+                    value={editName}
+                    autoFocus
+                    aria-label="Object name"
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(node.id);
+                      if (e.key === 'Escape') cancelRename();
+                    }}
+                    onBlur={() => commitRename(node.id)}
+                  />
+                ) : (
+                  <span
+                    className="lp-row-name"
+                    title="Double-click to rename"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      startRename(node.id, node.name);
+                    }}
+                  >
                     {node.name}
                   </span>
-                  {isActive && <span className="ms-layer-badge">Editing mesh</span>}
-                </div>
-
-                <div className="ms-layer-actions">
+                )}
+                <div className="lp-row-actions">
                   <button
                     type="button"
-                    className={`ms-layer-toggle ${node.visible ? 'on' : ''}`}
-                    title={node.visible ? 'Hide layer scene' : 'Show layer scene'}
+                    className={`lp-icon-btn ${node.visible ? 'on' : ''}`}
+                    title={node.visible ? 'Hide in viewport' : 'Show in viewport'}
+                    aria-label={node.visible ? 'Hide object' : 'Show object'}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleSceneNodeVisible(node.id);
                     }}
                   >
-                    {node.visible ? 'Vis' : 'Off'}
+                    {node.visible ? '◉' : '○'}
                   </button>
-
                   <button
                     type="button"
-                    className={`ms-layer-toggle ${node.locked ? 'locked' : ''}`}
-                    title={node.locked ? 'Unlock layer scene' : 'Lock layer scene'}
+                    className={`lp-icon-btn ${node.locked ? 'locked' : ''}`}
+                    title={node.locked ? 'Unlock object' : 'Lock object'}
+                    aria-label={node.locked ? 'Unlock object' : 'Lock object'}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleSceneNodeLocked(node.id);
                     }}
                   >
-                    {node.locked ? 'Lck' : 'Unl'}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="ms-layer-rename"
-                    title="Rename layer scene"
-                    aria-label="Rename layer scene"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRename(node.id, node.name);
-                    }}
-                  >
-                    ✎
+                    {node.locked ? 'L' : 'U'}
                   </button>
                 </div>
               </div>
@@ -117,12 +141,12 @@ export function LayersPanel() {
         )}
       </div>
 
-      <div className="ms-layers-footer">
-        <span className="ms-layers-footer-label">Layer scenes:</span> {layerScenes.length}
-        <span className="ms-layers-hint">
-          Draw shapes to add layer scenes. Object mode (1) selects whole layer scenes for move/rotate/scale.
-        </span>
-      </div>
+      <footer className="lp-footer">
+        <span>{objects.length} object{objects.length === 1 ? '' : 's'}</span>
+        {objects.length > 0 && (
+          <span className="lp-footer-hint">Dbl-click to edit mesh</span>
+        )}
+      </footer>
     </div>
   );
 }

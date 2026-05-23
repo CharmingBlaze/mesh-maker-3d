@@ -4,6 +4,25 @@ import type { EdgeKey } from '@/systems/selection/selectionSystem';
 import { applyExtrudeDistance, prepareExtrude } from '@/systems/mesh/extrudeBlender';
 import { bevelEdgesBlender } from '@/systems/mesh/bevelBlender';
 import { fillHole as fillHoleImpl } from '@/systems/mesh/fillHole';
+import * as THREE from 'three';
+import { buildKnifeProjector } from '@/hooks/knifeHelpers';
+import { knifeCut as knifeCutImpl, type KnifeProject } from '@/systems/mesh/knifeCut';
+import type { KnifeDrawView, KnifePoint } from '@/systems/mesh/knifeDraw';
+import { knifeSurfacePathMesh as knifeSurfacePathMeshImpl } from '@/systems/mesh/knifeSurfaceCut';
+import { loopCutEdges as loopCutEdgesImpl } from '@/systems/mesh/loopCut';
+import { mergeCoplanarFaces as mergeCoplanarFacesImpl } from '@/systems/mesh/mergeCoplanar';
+import { bridgeEdgeLoops as bridgeEdgeLoopsImpl } from '@/systems/mesh/bridgeLoops';
+import { dissolveEdges as dissolveEdgesImpl } from '@/systems/mesh/dissolveEdges';
+import { mergeSelectedVertices as mergeSelectedVerticesImpl } from '@/systems/mesh/mergeSelectedVerts';
+import { edgeSlide as edgeSlideImpl } from '@/systems/mesh/edgeSlide';
+import { separateFaces as separateFacesImpl } from '@/systems/mesh/separateSelection';
+import { mirrorGeometry as mirrorGeometryImpl, type MirrorAxis } from '@/systems/mesh/mirrorGeometry';
+import {
+  duplicateFaceSelection,
+  duplicateVertexSelection,
+  duplicateEdgeSelection,
+} from '@/systems/mesh/duplicateSelection';
+import { ripEdges as ripEdgesImpl } from '@/systems/mesh/ripEdges';
 
 export function fillHole(
   doc: MeshDocument,
@@ -220,6 +239,124 @@ export function subdivide(doc: MeshDocument, selFaces: Set<number>, groupIndex: 
     cleanFaces.push(f);
   });
   doc.faces = cleanFaces;
+}
+
+export function knifeCutMesh(
+  doc: MeshDocument,
+  p0: import('@/core/math/Vec3').Vec3,
+  p1: import('@/core/math/Vec3').Vec3,
+  project: KnifeProject,
+  faceFilter?: Set<number>,
+): boolean {
+  return knifeCutImpl(doc, p0, p1, project, faceFilter);
+}
+
+/** Blockbench-style knife: surface-local cuts per affected face. */
+export function knifeSurfacePathMesh(doc: MeshDocument, points: KnifePoint[]): boolean {
+  return knifeSurfacePathMeshImpl(doc, points);
+}
+
+/** Blender-style knife: view-aligned cut for each segment in the path. */
+export function knifeCutPathMesh(
+  doc: MeshDocument,
+  points: KnifePoint[],
+  view: KnifeDrawView,
+  options?: {
+    camera?: THREE.PerspectiveCamera;
+    viewRight?: import('@/core/math/Vec3').Vec3;
+    viewUp?: import('@/core/math/Vec3').Vec3;
+    faceFilter?: Set<number>;
+  },
+): boolean {
+  if (points.length < 2) return false;
+
+  const origin = points[0].position;
+  const project = buildKnifeProjector(view, origin, options?.camera, {
+    viewRight: options?.viewRight,
+    viewUp: options?.viewUp,
+  });
+
+  let changed = false;
+  for (let i = 1; i < points.length; i++) {
+    const p0 = points[i - 1].position;
+    const p1 = points[i].position;
+    if (knifeCutImpl(doc, p0, p1, project, options?.faceFilter)) changed = true;
+  }
+  return changed;
+}
+
+export function loopCutEdges(
+  doc: MeshDocument,
+  selEdges: Set<EdgeKey>,
+  t = 0.5,
+): Set<EdgeKey> {
+  return loopCutEdgesImpl(doc, selEdges, t);
+}
+
+export function mergeCoplanarFaces(doc: MeshDocument, selFaces: Set<number>): number[] {
+  return mergeCoplanarFacesImpl(doc, selFaces);
+}
+
+export function bridgeEdgeLoops(
+  doc: MeshDocument,
+  selEdges: Set<EdgeKey>,
+  groupIndex: number,
+): number[] | null {
+  return bridgeEdgeLoopsImpl(doc, selEdges, groupIndex);
+}
+
+export function dissolveEdges(doc: MeshDocument, selEdges: Set<EdgeKey>): number {
+  return dissolveEdgesImpl(doc, selEdges);
+}
+
+export function mergeSelectedVertices(doc: MeshDocument, selVerts: Set<number>): number | null {
+  return mergeSelectedVerticesImpl(doc, selVerts);
+}
+
+export function edgeSlide(doc: MeshDocument, selEdges: Set<EdgeKey>, amount: number): void {
+  edgeSlideImpl(doc, selEdges, amount);
+}
+
+export function separateFaces(doc: MeshDocument, selFaces: Set<number>): number {
+  return separateFacesImpl(doc, selFaces);
+}
+
+export function ripEdges(doc: MeshDocument, selEdges: Set<EdgeKey>): number {
+  return ripEdgesImpl(doc, selEdges);
+}
+
+export function mirrorGeometry(
+  doc: MeshDocument,
+  sourceFaceIndices: number[],
+  axis: MirrorAxis,
+  groupIndex: number,
+  offset = 0,
+): number[] {
+  return mirrorGeometryImpl(doc, sourceFaceIndices, axis, groupIndex, offset);
+}
+
+export function duplicateSelection(
+  doc: MeshDocument,
+  selectionMode: 'vertex' | 'edge' | 'face',
+  selVerts: Set<number>,
+  selEdges: Set<EdgeKey>,
+  selFaces: Set<number>,
+  groupIndex: number,
+  offset: import('@/core/math/Vec3').Vec3,
+): { selVerts: Set<number>; selEdges: Set<EdgeKey>; selFaces: Set<number> } | null {
+  if (selectionMode === 'face' && selFaces.size > 0) {
+    const created = duplicateFaceSelection(doc, selFaces, groupIndex, offset);
+    return created.length ? { selVerts: new Set(), selEdges: new Set(), selFaces: new Set(created) } : null;
+  }
+  if (selectionMode === 'vertex' && selVerts.size > 0) {
+    const created = duplicateVertexSelection(doc, selVerts, offset);
+    return created.size ? { selVerts: created, selEdges: new Set(), selFaces: new Set() } : null;
+  }
+  if (selectionMode === 'edge' && selEdges.size > 0) {
+    const created = duplicateEdgeSelection(doc, selEdges, offset);
+    return created.size ? { selVerts: new Set(), selEdges: created, selFaces: new Set() } : null;
+  }
+  return null;
 }
 
 export function triangulate(doc: MeshDocument, selFaces: Set<number>, groupIndex: number): void {

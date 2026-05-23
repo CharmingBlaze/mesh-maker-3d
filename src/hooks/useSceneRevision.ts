@@ -16,6 +16,12 @@ export function useMeshDocument(): MeshDocument {
   return useEditorStore((s) => s.getActiveMesh());
 }
 
+/** True when the scene has at least one placed object. */
+export function useHasSceneObjects(): boolean {
+  useSceneRevision();
+  return useEditorStore((s) => s.hasSceneObjects());
+}
+
 /** All placed objects with transforms for viewport rendering. */
 export function useSceneRenderEntries(): SceneRenderEntry[] {
   useSceneRevision();

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEditorStore } from '@/store/editorStore';
-import { useMeshDocument } from '@/hooks/useSceneRevision';
+import { useMeshDocument, useHasSceneObjects } from '@/hooks/useSceneRevision';
 import { layerGeometryCounts } from '@/systems/layers/layerSystem';
 
 /** Per-mesh vertex/face layers for the active layer scene. */
-export function GeometryLayersPanel() {
+export function GeometryLayersPanel({ tabView = false }: { tabView?: boolean }) {
   const mesh = useMeshDocument();
+  const hasSceneObjects = useHasSceneObjects();
   const layers = useEditorStore((s) => s.layers);
   const activeLayer = useEditorStore((s) => s.activeLayer);
   const addLayer = useEditorStore((s) => s.addLayer);
@@ -83,8 +84,17 @@ export function GeometryLayersPanel() {
 
   const active = layers[activeLayer];
 
+  if (!hasSceneObjects) {
+    return (
+      <fieldset className={`ms-fieldset ms-geo-layers ${tabView ? 'ms-geo-layers--tab' : ''}`}>
+        <legend>Geometry Layers</legend>
+        <div className="ms-empty">No objects in scene — add a primitive or import a mesh.</div>
+      </fieldset>
+    );
+  }
+
   return (
-    <fieldset className="ms-fieldset ms-geo-layers">
+    <fieldset className={`ms-fieldset ms-geo-layers ${tabView ? 'ms-geo-layers--tab' : ''}`}>
       <legend>Geometry Layers</legend>
       <div className="ms-layers-toolbar">
         <button type="button" className="ms-btn ms-layer-tb-btn" onClick={addLayer} title="Add geometry layer">

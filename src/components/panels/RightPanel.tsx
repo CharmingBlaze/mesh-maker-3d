@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useEditorStore } from '@/store/editorStore';
 import { meshStats } from '@/core/mesh/MeshDocument';
-import { useMeshDocument } from '@/hooks/useSceneRevision';
+import { useMeshDocument, useHasSceneObjects } from '@/hooks/useSceneRevision';
 
 export function RightPanel() {
   const mesh = useMeshDocument();
+  const hasSceneObjects = useHasSceneObjects();
   const layers = useEditorStore((s) => s.layers);
   const activeLayer = useEditorStore((s) => s.activeLayer);
   const groupSel = useEditorStore((s) => s.groupSel);
@@ -34,6 +35,15 @@ export function RightPanel() {
   const [dragLayer, setDragLayer] = useState<number | null>(null);
 
   const stats = meshStats(mesh);
+
+  if (!hasSceneObjects) {
+    return (
+      <div className="right-panel">
+        <div className="panel-hdr">Layers</div>
+        <div className="lp-empty">No objects in scene — add a primitive or import a mesh.</div>
+      </div>
+    );
+  }
 
   return (
     <div className="right-panel">

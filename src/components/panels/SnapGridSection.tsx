@@ -6,7 +6,7 @@ import {
   formatSnapSize,
 } from '@/systems/viewport/snapGrid';
 
-export function SnapGridSection() {
+export function SnapGridSection({ embedded = false }: { embedded?: boolean }) {
   const snapSize = useEditorStore((s) => s.snapSize);
   const snapEnabled = useEditorStore((s) => s.snapEnabled);
   const showGrid3D = useEditorStore((s) => s.showGrid3D);
@@ -38,25 +38,25 @@ export function SnapGridSection() {
 
   const applySize = (raw: number) => setSnapSize(clampSnapSize(raw));
 
-  return (
-    <fieldset className="ms-fieldset snap-grid-section">
-      <legend className="snap-grid-legend">
-        <span>Grid &amp; Snap</span>
+  const body = (
+    <>
+      <div className="snap-grid-head">
+        <span className="snap-grid-status">{snapEnabled ? `Snap ${label}` : 'Snap off'}</span>
         <button
           type="button"
           className={`snap-toggle ${snapEnabled ? 'on' : ''}`}
           role="switch"
           aria-checked={snapEnabled}
-          title={snapEnabled ? 'Snapping on — click to disable' : 'Snapping off — click to enable'}
+          title={snapEnabled ? 'Disable snapping' : 'Enable snapping'}
           onClick={() => setSnapEnabled(!snapEnabled)}
         >
           <span className="snap-toggle-thumb" />
           <span className="snap-toggle-text">{snapEnabled ? 'On' : 'Off'}</span>
         </button>
-      </legend>
+      </div>
 
       <div className="snap-preview" style={previewStyle} aria-hidden>
-        <span className="snap-preview-badge">{label} u</span>
+        <span className="snap-preview-badge">{label}</span>
       </div>
 
       <div className="snap-preset-row">
@@ -74,7 +74,7 @@ export function SnapGridSection() {
 
       <div className="snap-size-control">
         <label className="snap-size-label" htmlFor="snap-size-input">
-          Increment
+          Step
         </label>
         <div className="snap-size-inputs">
           <input
@@ -95,38 +95,37 @@ export function SnapGridSection() {
             step={1}
             value={Math.min(20, Math.max(1, Math.round(snapSize)))}
             onChange={(e) => applySize(parseInt(e.target.value, 10))}
-            aria-label="Grid size quick adjust"
+            aria-label="Grid step"
           />
         </div>
       </div>
 
-      <div className="snap-options">
-        <label className="snap-option">
-          <input
-            type="checkbox"
-            checked={showGrid3D}
-            onChange={(e) => setShowGrid3D(e.target.checked)}
-          />
-          <span>Show grid in viewports</span>
-        </label>
-      </div>
+      <label className="sp-toggle-row snap-option">
+        <input type="checkbox" checked={showGrid3D} onChange={(e) => setShowGrid3D(e.target.checked)} />
+        <span>Show grid in viewports</span>
+      </label>
 
-      <div className="snap-actions">
-        <button
-          type="button"
-          className="ms-btn snap-snap-btn"
-          onClick={snapToGrid}
-          title="Snap selected vertices to the grid (Mesh → Snap to Grid)"
-        >
-          Snap Selection
-        </button>
-      </div>
+      <button
+        type="button"
+        className="sp-action-btn sp-action-btn--full"
+        onClick={snapToGrid}
+        title="Snap selected vertices to grid"
+      >
+        Snap selection to grid
+      </button>
+    </>
+  );
 
-      <p className="snap-hint">
-        {snapEnabled
-          ? `Moves and draws align to ${label} world units.`
-          : 'Snapping disabled — grid is visual only.'}
-      </p>
+  if (embedded) {
+    return <div className="snap-grid-embedded">{body}</div>;
+  }
+
+  return (
+    <fieldset className="ms-fieldset snap-grid-section">
+      <legend className="snap-grid-legend">
+        <span>Grid &amp; Snap</span>
+      </legend>
+      {body}
     </fieldset>
   );
 }

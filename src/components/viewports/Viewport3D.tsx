@@ -5,10 +5,13 @@ import { sceneVisualKey } from '@/systems/viewport/meshVisualKey';
 import { useViewport3DInteraction } from '@/hooks/useViewport3DInteraction';
 import { useEditorStore } from '@/store/editorStore';
 import { editorEvents } from '@/core/events/EventBus';
-import { buildSceneRenderEntries } from '@/systems/scene/sceneObjectHelpers';
+import { buildSceneRenderEntries, getActiveSceneEntry } from '@/systems/scene/sceneObjectHelpers';
+import { knifeDrawForWorldPreview } from '@/hooks/knifeHelpers';
 import { boundsCenter } from '@/core/math/BoundingBox';
 import { formatPrimDrawDimensions } from '@/hooks/primDrawHelpers';
 import { vertexToScreen } from '@/systems/viewport/pick3D';
+import { computeSelectionWorldPivot } from '@/systems/viewport/transformGizmo3D';
+import type { ViewportSlotId } from '@/systems/viewport/viewportLayout';
 
 function syncRenderer(renderer: Viewport3DRenderer): void {
   const state = useEditorStore.getState();
@@ -46,15 +49,43 @@ function syncRenderer(renderer: Viewport3DRenderer): void {
   } else {
     renderer.setCadPrimPreview(null);
   }
+
+  if (state.knifeDraw && state.knifeDraw.view === '3d') {
+    const entry = getActiveSceneEntry(state.sceneGraph, state.meshes, state.activeMeshId);
+    const transform = entry?.transform ?? {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    };
+    renderer.setKnifePreview(knifeDrawForWorldPreview(state.knifeDraw, transform));
+  } else {
+    renderer.setKnifePreview(null);
+  }
+
+  if (
+    (state.tool === 'move' || state.tool === 'rotate' || state.tool === 'scale') &&
+    !state.primDraw
+  ) {
+    const pivot = computeSelectionWorldPivot();
+    const snap = state.snapEnabled ? state.snapSize : null;
+    if (pivot) {
+      renderer.setTransformGizmo(state.tool, pivot, snap);
+    } else {
+      renderer.setTransformGizmo(null, null);
+    }
+  } else {
+    renderer.setTransformGizmo(null, null);
+  }
+
   renderer.requestRender();
 }
 
-export function Viewport3D() {
+export function Viewport3D({ slotId }: { slotId: ViewportSlotId }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Viewport3DRenderer | null>(null);
 
-  const activeVP = useEditorStore((s) => s.activeVP);
+  const activeSlot = useEditorStore((s) => s.activeSlot);
   const maximizedVP = useEditorStore((s) => s.maximizedVP);
   const renderTick = useEditorStore((s) => s.renderTick);
   const showGrid3D = useEditorStore((s) => s.showGrid3D);
@@ -97,6 +128,11 @@ export function Viewport3D() {
 
     syncRenderer(renderer);
     const unsubRender = editorEvents.on('viewport:render', () => syncRenderer(renderer));
+    const unsubLiveTexture = editorEvents.on('texture:live-preview', (payload) => {
+      if (payload) {
+        renderer.updateLiveAtlasFromCanvas(payload.canvas, payload.width, payload.height);
+      }
+    });
     const unsubFrame = editorEvents.on('viewport:frame3d', (box) => {
       if (box) {
         renderer.orbitCamera.frameBox(
@@ -113,6 +149,7 @@ export function Viewport3D() {
 
     return () => {
       unsubRender();
+      unsubLiveTexture();
       unsubFrame();
       renderer.dispose();
       rendererRef.current = null;
@@ -128,7 +165,7 @@ export function Viewport3D() {
   return (
     <div
       ref={containerRef}
-      className={`vp vp--3d ${activeVP === '3d' || maximizedVP === '3d' ? 'vp-active' : ''}`}
+      className={`vp vp--3d ${activeSlot === slotId || maximizedVP === slotId ? 'vp-active' : ''}`}
     >
       <canvas ref={canvasRef} />
       {selRect && (selRect.w > 2 || selRect.h > 2) && (

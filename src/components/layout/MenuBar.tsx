@@ -1,6 +1,7 @@
 import { useEditorStore } from '@/store/editorStore';
+import { HelpGuideContent } from '@/components/help/HelpGuideContent';
 import { triggerImportMeshDialog, triggerOpenProjectDialog } from '@/components/layout/FileBridge';
-import { EditorToolbar } from '@/components/layout/EditorToolbar';
+import { ViewMenu } from '@/components/layout/ViewMenu';
 
 export function MenuBar() {
   const store = useEditorStore();
@@ -43,13 +44,33 @@ export function MenuBar() {
           <MenuItem onClick={store.invertSelection}>
             Invert <span className="dd-shortcut">I</span>
           </MenuItem>
+          <MenuItem onClick={store.selectLinked}>
+            Select Linked <span className="dd-shortcut">L</span>
+          </MenuItem>
+          <MenuItem onClick={store.growSelection}>
+            Grow Selection <span className="dd-shortcut">Ctrl+]</span>
+          </MenuItem>
+          <MenuItem onClick={store.shrinkSelection}>
+            Shrink Selection <span className="dd-shortcut">Ctrl+[</span>
+          </MenuItem>
           <MenuItem onClick={store.deselectAll}>
             Deselect <span className="dd-shortcut">D</span>
+          </MenuItem>
+          <MenuItem onClick={store.duplicateSelection}>
+            Duplicate Selection <span className="dd-shortcut">Shift+D</span>
           </MenuItem>
           <div className="dd-sep" />
           <MenuItem className="danger" onClick={store.deleteSelected}>
             Delete <span className="dd-shortcut">Del</span>
           </MenuItem>
+        </Dropdown>
+        <Dropdown label="Object">
+          <MenuItem onClick={store.duplicateSelectedObjects}>
+            Duplicate <span className="dd-shortcut">Ctrl+D</span>
+          </MenuItem>
+          <div className="dd-sep" />
+          <MenuItem onClick={store.originToGeometry}>Origin to Geometry</MenuItem>
+          <MenuItem onClick={store.geometryToOrigin}>Geometry to Origin</MenuItem>
         </Dropdown>
         <Dropdown label="Mesh">
           <MenuItem onClick={() => store.weldVerts()}>Weld Selected</MenuItem>
@@ -64,6 +85,31 @@ export function MenuBar() {
             Flip Normals <span className="dd-shortcut">Shift+N</span>
           </MenuItem>
           <MenuItem onClick={store.subdivide}>Subdivide</MenuItem>
+          <MenuItem onClick={store.loopCut}>
+            Loop Cut <span className="dd-shortcut">Ctrl+R</span>
+          </MenuItem>
+          <MenuItem onClick={store.edgeSlide}>
+            Edge Slide <span className="dd-shortcut">Ctrl+Shift+E</span>
+          </MenuItem>
+          <MenuItem onClick={store.dissolveEdges}>
+            Dissolve Edges <span className="dd-shortcut">Ctrl+Shift+D</span>
+          </MenuItem>
+          <MenuItem onClick={store.mergeSelectedVerts}>
+            Merge Vertices <span className="dd-shortcut">Alt+M</span>
+          </MenuItem>
+          <MenuItem onClick={store.separateSelection}>
+            Separate <span className="dd-shortcut">Alt+Shift+P</span>
+          </MenuItem>
+          <MenuItem onClick={store.ripEdges}>
+            Rip Edges <span className="dd-shortcut">Ctrl+Shift+V</span>
+          </MenuItem>
+          <div className="dd-sep" />
+          <MenuItem onClick={() => store.mirrorSelection('x')}>Mirror X</MenuItem>
+          <MenuItem onClick={() => store.mirrorSelection('y')}>Mirror Y</MenuItem>
+          <MenuItem onClick={() => store.mirrorSelection('z')}>Mirror Z</MenuItem>
+          <div className="dd-sep" />
+          <MenuItem onClick={store.bridgeEdgeLoops}>Bridge Loops</MenuItem>
+          <MenuItem onClick={store.mergeCoplanar}>Merge Coplanar</MenuItem>
           <MenuItem onClick={store.triangulateFaces}>Triangulate</MenuItem>
           <MenuItem onClick={() => store.setTool('extrude')}>Extrude Tool (E)</MenuItem>
           <MenuItem onClick={store.extrudeFaces}>Extrude Selection</MenuItem>
@@ -71,56 +117,31 @@ export function MenuBar() {
           <MenuItem onClick={store.bevelEdges}>Bevel Selection</MenuItem>
           <MenuItem onClick={() => store.setTool('inset')}>Inset Tool (J)</MenuItem>
           <MenuItem onClick={store.insetFaces}>Inset Selection</MenuItem>
+          <MenuItem onClick={() => store.activateKnifeTool()}>Knife Tool (K)</MenuItem>
           <MenuItem onClick={store.smoothMesh}>Smooth</MenuItem>
         </Dropdown>
-        <Dropdown label="View">
-          <MenuItem onClick={store.toggleWireframe}>
-            Wireframe <span className="dd-shortcut">W</span>
-          </MenuItem>
-          <MenuItem onClick={store.toggleFlat}>Flat Shading</MenuItem>
-          <MenuItem onClick={store.frameAll}>
-            Frame All <span className="dd-shortcut">Shift+F</span>
-          </MenuItem>
-          <MenuItem onClick={store.centerAllViews}>Center All Views</MenuItem>
-          <div className="dd-sep" />
-          <MenuItem onClick={store.toggleGrid3D}>Viewport Grid</MenuItem>
-        </Dropdown>
-        <Dropdown label="Window">
-          <MenuItem onClick={() => store.setViewportLayout('quad')}>Layout: Four views (2×2)</MenuItem>
-          <MenuItem onClick={() => store.setViewportLayout('horizontal')}>Layout: Four in a row</MenuItem>
-          <MenuItem onClick={() => store.setViewportLayout('vertical')}>Layout: Four in a column</MenuItem>
-          <MenuItem onClick={() => store.setViewportLayout('focus3d')}>Layout: Large 3D + strip</MenuItem>
-          <div className="dd-sep" />
-          <MenuItem onClick={store.toggleViewportMaximize}>
-            Maximize active view <span className="dd-shortcut">Space</span>
-          </MenuItem>
-          <MenuItem onClick={store.centerAllViews}>Reset & center views</MenuItem>
+        <Dropdown label="View" className="dropdown--view">
+          <ViewMenu />
         </Dropdown>
         <Dropdown label="Help">
-          <div className="shortcut-menu">
-            <div><span>Ctrl+N</span>New</div>
-            <div><span>Ctrl+O</span>Open</div>
-            <div><span>Ctrl+S</span>Save</div>
-            <div><span>1–4</span>Selection mode</div>
-            <div><span>S/M/G/C/E/B/J</span>Edit tools</div>
-            <div><span>V/F</span>Vertex / Face draw</div>
-            <div><span>F</span>Frame all</div>
-            <div><span>Space</span>Maximize view</div>
-            <div><span>LMB</span>Edit in all views</div>
-            <div><span>RMB</span>3D orbit</div>
-            <div><span>MMB</span>3D pan</div>
-          </div>
+          <HelpGuideContent />
         </Dropdown>
       </div>
-      <EditorToolbar />
-      <div className="menubar-end" aria-hidden="true" />
     </div>
   );
 }
 
-function Dropdown({ label, children }: { label: string; children: React.ReactNode }) {
+function Dropdown({
+  label,
+  children,
+  className,
+}: {
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="dropdown">
+    <div className={`dropdown ${className ?? ''}`}>
       <button type="button" className="menu-btn">
         <span>{label}</span>
         <span className="menu-chevron">▾</span>

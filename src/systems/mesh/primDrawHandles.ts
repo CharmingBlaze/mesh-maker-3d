@@ -139,10 +139,28 @@ export function applyCornerHandleDrag(
   cornerIndex: number,
   world: Vec3,
   snap: (n: number) => number,
+  modifiers?: { shiftKey?: boolean; ctrlKey?: boolean },
+  squareAxes?: ['x' | 'y' | 'z', 'x' | 'y' | 'z'],
 ): BoundingBox {
+  let target = snapVec3(world, snap);
+  if (modifiers?.ctrlKey && squareAxes) {
+    const corners = boundsCorners(bounds);
+    const fixed = corners[oppositeCornerIndex(cornerIndex)];
+    const [axisA, axisB] = squareAxes;
+    const dA = target[axisA] - fixed[axisA];
+    const dB = target[axisB] - fixed[axisB];
+    const span = Math.max(Math.abs(dA), Math.abs(dB));
+    const signA = dA === 0 ? 1 : Math.sign(dA);
+    const signB = dB === 0 ? 1 : Math.sign(dB);
+    target = {
+      ...target,
+      [axisA]: fixed[axisA] + signA * span,
+      [axisB]: fixed[axisB] + signB * span,
+    };
+  }
   const corners = boundsCorners(bounds);
   const fixed = corners[oppositeCornerIndex(cornerIndex)];
-  return boundsFromCorners(fixed, snapVec3(world, snap));
+  return boundsFromCorners(fixed, target);
 }
 
 export function applyFaceHandleDrag(
@@ -151,9 +169,15 @@ export function applyFaceHandleDrag(
   sign: 1 | -1,
   world: Vec3,
   snap: (n: number) => number,
+  modifiers?: { shiftKey?: boolean; ctrlKey?: boolean },
 ): BoundingBox {
+  let target = snapVec3(world, snap);
+  if (modifiers?.shiftKey) {
+    const center = boundsCenter(bounds);
+    target = { ...target, [axis]: center[axis] };
+  }
   const out = { min: { ...bounds.min }, max: { ...bounds.max } };
-  const val = snap(world[axis]);
+  const val = target[axis];
   if (sign > 0) out.max[axis] = val;
   else out.min[axis] = val;
   if (out.min[axis] > out.max[axis]) {
@@ -169,12 +193,28 @@ export function applyCenterHandleDrag(
   startWorld: Vec3,
   world: Vec3,
   snap: (n: number) => number,
+  modifiers?: { shiftKey?: boolean; ctrlKey?: boolean },
 ): BoundingBox {
   const sw = snapVec3(startWorld, snap);
-  const cw = snapVec3(world, snap);
-  const dx = cw.x - sw.x;
-  const dy = cw.y - sw.y;
-  const dz = cw.z - sw.z;
+  let cw = snapVec3(world, snap);
+  let dx = cw.x - sw.x;
+  let dy = cw.y - sw.y;
+  let dz = cw.z - sw.z;
+  if (modifiers?.shiftKey) {
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
+    const az = Math.abs(dz);
+    if (ax >= ay && ax >= az) {
+      dy = 0;
+      dz = 0;
+    } else if (ay >= ax && ay >= az) {
+      dx = 0;
+      dz = 0;
+    } else {
+      dx = 0;
+      dy = 0;
+    }
+  }
   return {
     min: { x: startBounds.min.x + dx, y: startBounds.min.y + dy, z: startBounds.min.z + dz },
     max: { x: startBounds.max.x + dx, y: startBounds.max.y + dy, z: startBounds.max.z + dz },
@@ -187,15 +227,17 @@ export function applyHandleDrag(
   world: Vec3,
   snap: (n: number) => number,
   dragStart?: { bounds: BoundingBox; world: Vec3 },
+  modifiers?: { shiftKey?: boolean; ctrlKey?: boolean },
+  squareAxes?: ['x' | 'y' | 'z', 'x' | 'y' | 'z'],
 ): BoundingBox {
   if (handle.kind === 'corner' && handle.cornerIndex !== undefined) {
-    return applyCornerHandleDrag(bounds, handle.cornerIndex, world, snap);
+    return applyCornerHandleDrag(bounds, handle.cornerIndex, world, snap, modifiers, squareAxes);
   }
   if ((handle.kind === 'face' || handle.kind === 'extent') && handle.axis && handle.sign) {
-    return applyFaceHandleDrag(bounds, handle.axis, handle.sign, world, snap);
+    return applyFaceHandleDrag(bounds, handle.axis, handle.sign, world, snap, modifiers);
   }
   if (handle.kind === 'center' && dragStart) {
-    return applyCenterHandleDrag(dragStart.bounds, dragStart.world, world, snap);
+    return applyCenterHandleDrag(dragStart.bounds, dragStart.world, world, snap, modifiers);
   }
   return bounds;
 }

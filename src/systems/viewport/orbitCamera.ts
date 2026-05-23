@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { VIEWPORT_FRAME_PADDING } from '@/systems/viewport/viewportFrame';
 
 /** Min/max polar angle (phi) — keep camera off the poles. */
 const PHI_EPS = 0.08;
@@ -98,7 +99,7 @@ export class OrbitCamera {
     const radius = Math.max(size.x, size.y, size.z) * 0.5;
     this.target.copy(center);
     this.spherical.radius = THREE.MathUtils.clamp(
-      Math.max(80, radius * 2.8),
+      Math.max(80, radius * 2.08 * VIEWPORT_FRAME_PADDING),
       DIST_MIN,
       DIST_MAX,
     );

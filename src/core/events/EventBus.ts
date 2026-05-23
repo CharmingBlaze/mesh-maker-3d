@@ -23,6 +23,8 @@ export type EditorEvents = {
   'tool:changed': string;
   'viewport:render': void;
   'viewport:frame3d': BoundingBox | null;
+  'viewport:frame2d': void;
+  'texture:live-preview': { canvas: HTMLCanvasElement; width: number; height: number } | null;
 };
 
 export const editorEvents = new EventBus<EditorEvents>();

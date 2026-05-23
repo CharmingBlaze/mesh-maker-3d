@@ -23,14 +23,25 @@ export interface PrimDrawState {
 }
 
 export const PRIM_DRAW_HINTS: Record<PrimDrawPhase, string> = {
-  base: 'Click = default size · Drag = custom footprint · Esc cancel',
-  extent: 'Scroll = height · Drag handles to adjust · Enter or Place to commit · Esc cancel',
+  base: 'Click = last size · Drag footprint · Shift = axis lock · Ctrl = square · Esc cancel',
+  extent:
+    'Scroll = height (Shift fine) · Drag handles · Shift/Ctrl constrain · Enter or Place · Esc cancel',
 };
 
 export const PRIM_DRAW_HINTS_3D: Record<PrimDrawPhase, string> = {
-  base: 'Click = default on ground · Drag footprint on XZ · Esc cancel',
-  extent: 'Scroll = height · Drag handles · Enter or Place to commit · Esc cancel',
+  base: 'Click = last size on ground · Drag XZ footprint · Shift/Ctrl constrain · Esc cancel',
+  extent: 'Scroll = height (Shift fine) · Drag handles · Enter or Place · Esc cancel',
 };
+
+/** Full Shift/Ctrl modifier reference — shown in Shapes help while drawing. */
+export const PRIM_DRAW_CONSTRAINT_HELP: readonly string[] = [
+  'Shift + drag footprint — axis lock (dominant plane axis only)',
+  'Ctrl + drag footprint — square footprint (equal spans)',
+  'Ctrl + corner handle (base phase) — square resize',
+  'Shift + face handle — symmetric resize from center on that axis',
+  'Shift + center handle — move locked to one world axis',
+  'Shift + scroll — fine height steps',
+];
 
 export function viewPlaneAxes(vp: View2DKey): ['x' | 'y' | 'z', 'x' | 'y' | 'z'] {
   if (vp === 'top') return ['x', 'z'];

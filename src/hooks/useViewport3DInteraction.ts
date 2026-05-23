@@ -20,6 +20,7 @@ import {
   canStartModelingDrag,
   createModelingDragState,
   isModelingTool,
+  startModalModelingDrag,
   tryStartModelingDrag,
 } from '@/hooks/modelingDrag';
 import {
@@ -28,6 +29,8 @@ import {
   resolvePrimDragRelease,
   updatePrimDrag3D,
   constrainPrimDrawBounds,
+  footprintSquareAxes,
+  lastPrimSizeForDraw,
 } from '@/hooks/primDrawHelpers';
 import {
   applyHandleDrag,
@@ -49,6 +52,7 @@ import {
   snapVec3,
   vertexToScreen,
 } from '@/systems/viewport/pick3D';
+import { meshForViewportPick, getActiveSceneEntry } from '@/systems/scene/sceneObjectHelpers';
 import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layerSystem';
 import type { EdgeKey } from '@/systems/selection/selectionSystem';
 import {
@@ -60,7 +64,22 @@ import {
 } from '@/systems/selection/selectionSystem';
 import { editorEvents } from '@/core/events/EventBus';
 import { useEditorStore } from '@/store/editorStore';
+import {
+  addKnifePoint,
+  createKnifeDrawState,
+  withKnifeHover,
+} from '@/systems/mesh/knifeDraw';
+import { pickKnifePoint3D } from '@/systems/mesh/knifePick';
+import { captureKnifeViewBasis, knifeDrawForWorldPreview, knifePointToLocal } from '@/hooks/knifeHelpers';
 import { isMarqueeDone, useMarqueeRect } from '@/hooks/marqueeState';
+import {
+  beginLoopCutDrag,
+  createLoopCutDragState,
+  loopCutTFromDrag,
+  resetLoopCutDrag,
+} from '@/hooks/loopCutDrag';
+import { edgeSlideAmountFromDrag } from '@/systems/mesh/edgeSlide';
+import { mirrorOffsetFromDrag } from '@/systems/mesh/mirrorGeometry';
 
 export type ScreenSelRect = import('@/systems/viewport/drawView2D').SelRect;
 
@@ -83,6 +102,9 @@ export function useViewport3DInteraction(
   const navLastRef = useRef({ x: 0, y: 0 });
   const dragRef = useRef(createTransformDragState());
   const modelingDragRef = useRef(createModelingDragState());
+  const loopCutDragRef = useRef(createLoopCutDragState());
+  const edgeSlideDragRef = useRef(createLoopCutDragState());
+  const mirrorDragRef = useRef(createLoopCutDragState());
   const primDragRef = useRef<{
     active: boolean;
     mode: 'create-base' | 'create-extent' | 'handle';
@@ -146,12 +168,22 @@ export function useViewport3DInteraction(
       return raw ? snapVec3(raw, state.snap) : null;
     };
 
-    const handleClick = (sx: number, sy: number, shiftKey: boolean, ctrlKey = false) => {
+    const handleClick = (sx: number, sy: number, shiftKey: boolean, ctrlKey = false, altKey = false) => {
       const renderer = getRenderer();
       if (!renderer) return;
       const state = useEditorStore.getState();
       const canvas = renderer.renderer.domElement;
       const mesh = state.getActiveMesh();
+      const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+      if (!pickMesh) {
+        if (
+          supportsSelectionMarquee(state.tool) &&
+          effectiveSelectionMode(state.tool, state.selectionMode) === 'object'
+        ) {
+          state.applyObjectClickSelection('3d', sx, sy, shiftKey, ctrlKey, renderer.camera, canvas);
+        }
+        return;
+      }
       const visibleVerts = visibleVertexIndices(mesh);
       const commitFace = (verts: number[], label = 'Add Face') => {
         const fresh = useEditorStore.getState();
@@ -189,7 +221,7 @@ export function useViewport3DInteraction(
       };
 
       if (state.tool === 'vertex') {
-        const vi = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
+        const vi = nearestVertexScreen(renderer.camera, canvas, pickMesh, sx, sy, visibleVerts);
         const wp =
           vi >= 0
             ? mesh.vertices[vi]
@@ -210,7 +242,7 @@ export function useViewport3DInteraction(
       }
 
       if (state.tool === 'face') {
-        const vi = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
+        const vi = nearestVertexScreen(renderer.camera, canvas, pickMesh, sx, sy, visibleVerts);
         if (vi < 0) return;
         const fresh = useEditorStore.getState();
         const wip = [...fresh.wipFace];
@@ -234,7 +266,7 @@ export function useViewport3DInteraction(
         if (mode === 'object') {
           state.applyObjectClickSelection('3d', sx, sy, shiftKey, ctrlKey, renderer.camera, canvas);
         } else {
-          state.applyClickSelection3D(renderer.camera, canvas, sx, sy, shiftKey, ctrlKey);
+          state.applyClickSelection3D(renderer.camera, canvas, sx, sy, shiftKey, ctrlKey, altKey);
         }
       }
     };
@@ -270,6 +302,73 @@ export function useViewport3DInteraction(
 
       dragRef.current.mouseDownPos = { x: sx, y: sy };
       dragRef.current.isDragging = false;
+
+      if (state.armedModeling && isModelingTool(state.tool)) {
+        if (startModalModelingDrag(modelingDragRef.current, state.tool, sx, sy)) {
+          container.setPointerCapture(e.pointerId);
+          return;
+        }
+        state.clearArmedModeling();
+      }
+
+      if (state.armedModeling === 'loopcut' && state.loopCutPreview) {
+        beginLoopCutDrag(loopCutDragRef.current, sx, sy, state.loopCutPreview.t);
+        container.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      if (state.armedModeling === 'edgeslide' && state.edgeSlidePreview) {
+        beginLoopCutDrag(edgeSlideDragRef.current, sx, sy, state.edgeSlidePreview.amount);
+        container.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      if (state.armedModeling === 'mirror' && state.mirrorPreview) {
+        beginLoopCutDrag(mirrorDragRef.current, sx, sy, state.mirrorPreview.offset);
+        container.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      if (state.tool === 'knife' && state.selectionMode !== 'object') {
+        const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+        if (!pickMesh) return;
+        const mesh = state.getActiveMesh();
+        const entry = getActiveSceneEntry(state.sceneGraph, state.meshes, state.activeMeshId);
+        const transform = entry?.transform ?? {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        };
+        const visibleVerts = visibleVertexIndices(mesh);
+        const visibleFaces = visibleFaceIndices(mesh);
+        const draw =
+          state.knifeDraw?.view === '3d'
+            ? state.knifeDraw
+            : createKnifeDrawState('3d', captureKnifeViewBasis(renderer.camera));
+        const worldPoint = pickKnifePoint3D(
+          renderer.camera,
+          canvas,
+          pickMesh,
+          sx,
+          sy,
+          visibleVerts,
+          visibleFaces,
+          draw.points,
+          {
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey || e.metaKey,
+            snap: state.snap,
+          },
+        );
+        if (!worldPoint) return;
+        const point = knifePointToLocal(worldPoint, transform);
+        const next = addKnifePoint(withKnifeHover(draw, point), point);
+        if (!next) return;
+        state.setKnifeDraw(next);
+        renderer.setKnifePreview(knifeDrawForWorldPreview(next, transform));
+        container.setPointerCapture(e.pointerId);
+        return;
+      }
 
       if (state.primDraw) {
         const draw = state.primDraw;
@@ -312,11 +411,32 @@ export function useViewport3DInteraction(
       }
 
       const mesh = state.getActiveMesh();
+      const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+      if (!pickMesh) {
+        if (supportsSelectionMarquee(state.tool)) {
+          beginMarquee(
+            sx,
+            sy,
+            (rect, shiftKey, ctrlKey) => {
+              const fresh = useEditorStore.getState();
+              if (supportsSelectionMarquee(fresh.tool)) {
+                fresh.applyBoxSelection3D(renderer.camera, canvas, rect, shiftKey, ctrlKey);
+              }
+            },
+            container,
+          );
+          container.setPointerCapture(e.pointerId);
+        }
+        return;
+      }
       const visibleVerts = visibleVertexIndices(mesh);
       const visibleFaces = visibleFaceIndices(mesh);
-      const viPick = nearestVertexScreen(renderer.camera, canvas, mesh, sx, sy, visibleVerts);
+      const viPick = nearestVertexScreen(renderer.camera, canvas, pickMesh, sx, sy, visibleVerts);
 
       if (isTransformTool(state.tool)) {
+        if (renderer.isTransformGizmoDragging()) {
+          return;
+        }
         if (
           state.selectionMode === 'object' &&
           beginObjectTransformDrag(dragRef.current, state.tool, sx, sy)
@@ -363,13 +483,13 @@ export function useViewport3DInteraction(
         if (isModelingTool(state.tool)) {
           let hitSelected = false;
           if (state.tool === 'extrude' || state.tool === 'inset') {
-            const fi = pickFaceMesh3D(renderer.camera, canvas, mesh, sx, sy, visibleFaces);
+            const fi = pickFaceMesh3D(renderer.camera, canvas, pickMesh, sx, sy, visibleFaces);
             hitSelected = fi >= 0 && state.selFaces.has(fi);
           } else if (state.tool === 'bevel') {
             const edge = nearestEdgeScreen(
               renderer.camera,
               canvas,
-              mesh,
+              pickMesh,
               sx,
               sy,
               visibleVerts,
@@ -433,6 +553,76 @@ export function useViewport3DInteraction(
         return;
       }
 
+      if (
+        loopCutDragRef.current.isDragging &&
+        state.loopCutPreview &&
+        loopCutDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - loopCutDragRef.current.mouseDownPos.y;
+        state.updateLoopCutT(loopCutTFromDrag(dy, loopCutDragRef.current.startT));
+        return;
+      }
+
+      if (
+        edgeSlideDragRef.current.isDragging &&
+        state.edgeSlidePreview &&
+        edgeSlideDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - edgeSlideDragRef.current.mouseDownPos.y;
+        state.updateEdgeSlideAmount(edgeSlideAmountFromDrag(dy, edgeSlideDragRef.current.startT));
+        return;
+      }
+
+      if (
+        mirrorDragRef.current.isDragging &&
+        state.mirrorPreview &&
+        mirrorDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - mirrorDragRef.current.mouseDownPos.y;
+        state.updateMirrorPreview({
+          offset: mirrorOffsetFromDrag(dy, mirrorDragRef.current.startT),
+        });
+        return;
+      }
+
+      if (state.tool === 'knife' && state.selectionMode !== 'object') {
+        const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+        if (!pickMesh) return;
+        const mesh = state.getActiveMesh();
+        const entry = getActiveSceneEntry(state.sceneGraph, state.meshes, state.activeMeshId);
+        const transform = entry?.transform ?? {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        };
+        const visibleVerts = visibleVertexIndices(mesh);
+        const visibleFaces = visibleFaceIndices(mesh);
+        const draw =
+          state.knifeDraw?.view === '3d'
+            ? state.knifeDraw
+            : createKnifeDrawState('3d', captureKnifeViewBasis(renderer.camera));
+        const worldHover = pickKnifePoint3D(
+          renderer.camera,
+          canvas,
+          pickMesh,
+          sx,
+          sy,
+          visibleVerts,
+          visibleFaces,
+          draw.points,
+          {
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey || e.metaKey,
+            snap: state.snap,
+          },
+        );
+        const hover = worldHover ? knifePointToLocal(worldHover, transform) : null;
+        const next = withKnifeHover(draw, hover);
+        state.setKnifeDraw(next);
+        renderer.setKnifePreview(knifeDrawForWorldPreview(next, transform));
+        return;
+      }
+
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         const drag = primDragRef.current;
         const draw = state.primDraw;
@@ -440,12 +630,15 @@ export function useViewport3DInteraction(
         if (drag.mode === 'handle' && drag.handle) {
           const p1 = pickHandleWorld(sx, sy, drag.handle, drag.dragStart?.bounds ?? draw.bounds);
           if (p1) {
+            const modifiers = { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey };
             const nextBounds = applyHandleDrag(
               drag.dragStart?.bounds ?? draw.bounds,
               drag.handle,
               p1,
               state.snap,
               drag.dragStart ?? undefined,
+              modifiers,
+              draw.phase === 'base' ? footprintSquareAxes(draw) : undefined,
             );
             const updated = constrainPrimDrawBounds({ ...draw, bounds: nextBounds, cursor: p1 });
             state.setPrimDraw(updated);
@@ -457,7 +650,11 @@ export function useViewport3DInteraction(
         const phase = draw.phase;
         const origin = phase === 'extent' ? boundsCenter(draw.bounds) : undefined;
         const p1 = pickPrim(sx, sy, phase, origin);
-        if (p1 && drag.anchor) state.setPrimDraw(updatePrimDrag3D(draw, drag.anchor, p1));
+        if (p1 && drag.anchor) {
+          state.setPrimDraw(
+            updatePrimDrag3D(draw, drag.anchor, p1, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }),
+          );
+        }
         return;
       }
 
@@ -469,13 +666,15 @@ export function useViewport3DInteraction(
         container.style.cursor = '';
       }
 
+      const drag = dragRef.current;
+
       if (isMarqueeActive()) {
         updateMarquee(sx, sy);
         return;
       }
 
-      const drag = dragRef.current;
       if (isTransformTool(state.tool)) {
+        if (renderer.isTransformGizmoDragging()) return;
         if (tryStartTransformDrag(drag, sx, sy)) {
           if (state.tool === 'move') {
             if (drag.dragOrigObjects?.length) {
@@ -586,6 +785,27 @@ export function useViewport3DInteraction(
       const marqueeApplied = !!liveMarquee && isMarqueeDone(liveMarquee);
       if (isMarqueeActive()) endMarquee(e.shiftKey, e.ctrlKey);
 
+      if (loopCutDragRef.current.isDragging) {
+        state.commitLoopCutPreview();
+        resetLoopCutDrag(loopCutDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
+      if (edgeSlideDragRef.current.isDragging) {
+        state.commitEdgeSlidePreview();
+        resetLoopCutDrag(edgeSlideDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
+      if (mirrorDragRef.current.isDragging) {
+        state.commitMirrorPreview();
+        resetLoopCutDrag(mirrorDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         const min = state.snapSize;
         const draw = state.primDraw;
@@ -594,7 +814,15 @@ export function useViewport3DInteraction(
         const clickPoint = primDragRef.current.anchor;
         const pointerMoved = drag.screen ? !isClickNotDrag(drag.screen, sx, sy) : true;
 
-        const next = resolvePrimDragRelease(draw, mode, min, '3d', clickPoint, pointerMoved);
+        const next = resolvePrimDragRelease(
+          draw,
+          mode,
+          min,
+          '3d',
+          clickPoint,
+          pointerMoved,
+          lastPrimSizeForDraw(state.lastPrimSizes, draw.type),
+        );
         if (next) {
           state.setPrimDraw(next);
         }
@@ -620,7 +848,7 @@ export function useViewport3DInteraction(
 
       const mDrag = modelingDragRef.current;
 
-      if (!marqueeApplied && !state.primDraw && !moved && drag.mouseDownPos && !drag.isDragging) {
+      if (!marqueeApplied && !state.primDraw && !state.loopCutPreview && !state.edgeSlidePreview && !state.knifeDraw && state.tool !== 'knife' && !moved && drag.mouseDownPos && !drag.isDragging) {
         const renderer = getRenderer();
         if (isModelingTool(state.tool) && renderer) {
           state.applyClickSelection3D(
@@ -630,9 +858,10 @@ export function useViewport3DInteraction(
             sy,
             e.shiftKey,
             e.ctrlKey,
+            e.altKey,
           );
         } else {
-          handleClick(sx, sy, e.shiftKey, e.ctrlKey);
+          handleClick(sx, sy, e.shiftKey, e.ctrlKey, e.altKey);
         }
       }
 
@@ -672,6 +901,12 @@ export function useViewport3DInteraction(
             state.notifyChange();
           }),
         );
+        if (state.tool === 'inset' || state.tool === 'extrude') {
+          state.setSelFaces(new Set(mDrag.targetFaces));
+        } else if (state.tool === 'bevel') {
+          state.setSelEdges(new Set(mDrag.targetEdges));
+        }
+        state.clearArmedModeling();
       }
       modelingDragRef.current = createModelingDragState();
 
@@ -682,6 +917,7 @@ export function useViewport3DInteraction(
       drag.beforeSnapshot = null;
       drag.drag3dPlaneStart = null;
       drag.drag3dPivot = null;
+      drag.dragOrigObjects = null;
 
       try {
         container.releasePointerCapture(e.pointerId);
@@ -713,6 +949,14 @@ export function useViewport3DInteraction(
 
     const onPointerLeave = () => clearMarquee();
 
+    const onDoubleClick = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const state = useEditorStore.getState();
+      if (state.selectionMode === 'object') return;
+      if (state.primDraw || state.knifeDraw) return;
+      state.selectLinked();
+    };
+
     container.addEventListener('pointerdown', onPointerDown);
     container.addEventListener('pointermove', onPointerMove);
     container.addEventListener('pointerup', onPointerUp);
@@ -720,6 +964,7 @@ export function useViewport3DInteraction(
     container.addEventListener('pointerleave', onPointerLeave);
     container.addEventListener('wheel', onWheel, { passive: false });
     container.addEventListener('contextmenu', (e) => e.preventDefault());
+    container.addEventListener('dblclick', onDoubleClick);
 
     return () => {
       container.removeEventListener('pointerdown', onPointerDown);
@@ -729,6 +974,7 @@ export function useViewport3DInteraction(
       container.removeEventListener('pointerleave', onPointerLeave);
       container.removeEventListener('wheel', onWheel);
       container.removeEventListener('contextmenu', (e) => e.preventDefault());
+      container.removeEventListener('dblclick', onDoubleClick);
       clearMarquee();
     };
   }, [containerRef, rendererRef, beginMarquee, updateMarquee, endMarquee, clearMarquee, isMarqueeActive]);

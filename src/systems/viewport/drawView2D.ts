@@ -1,16 +1,23 @@
 import { VIEW2D_DEFS, w2s, type View2DKey } from '@/core/math/projection';
+import type { Vec3 } from '@/core/math/Vec3';
 import { faceGroupIndex, type MeshDocument } from '@/core/mesh/MeshDocument';
 import type { PrimDrawState } from '@/systems/mesh/primDraw';
+import type { KnifeDrawState } from '@/systems/mesh/knifeDraw';
 import { drawBoundsWireframe2D, drawCadPrimPreview2D } from '@/systems/viewport/drawBoundsPreview';
 import { parseEdgeKey, type EdgeKey } from '@/systems/selection/selectionSystem';
 import { MS3D_VIEW } from '@/systems/viewport/viewportColors';
 import { ORTHO_MAJOR_EVERY, orthoGridScreenStep } from '@/systems/viewport/snapGrid';
 import {
+  meshInWorldSpace,
   meshWorldBounds,
-  transformPoint,
   type SceneRenderEntry,
 } from '@/systems/scene/sceneObjectHelpers';
+import { knifeDrawForWorldPreview } from '@/hooks/knifeHelpers';
+import type { Transform } from '@/core/scene-graph/SceneNode';
 import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layerSystem';
+import { drawTransformGizmo2D } from '@/systems/viewport/transformGizmo2D';
+import type { GizmoMode } from '@/systems/viewport/transformGizmo3D';
+import type { GizmoAxis } from '@/systems/viewport/transformGizmo2D';
 
 export interface SelRect {
   x: number;
@@ -71,6 +78,16 @@ function drawOrthoBackground(
     ctx.lineTo(W, y);
     ctx.stroke();
   }
+
+  const origin = w2s(0, 0, state.pan, state.zoom);
+  ctx.strokeStyle = MS3D_VIEW.orthoGridCenter;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, origin.y);
+  ctx.lineTo(W, origin.y);
+  ctx.moveTo(origin.x, 0);
+  ctx.lineTo(origin.x, H);
+  ctx.stroke();
 }
 
 export function drawView2D(
@@ -197,25 +214,6 @@ export function drawView2D(
   }
 }
 
-function meshInWorldSpace(mesh: MeshDocument, entry: SceneRenderEntry): MeshDocument {
-  const t = entry.transform;
-  const isIdentity =
-    t.position.x === 0 &&
-    t.position.y === 0 &&
-    t.position.z === 0 &&
-    t.rotation.x === 0 &&
-    t.rotation.y === 0 &&
-    t.rotation.z === 0 &&
-    t.scale.x === 1 &&
-    t.scale.y === 1 &&
-    t.scale.z === 1;
-  if (isIdentity) return mesh;
-  return {
-    ...mesh,
-    vertices: mesh.vertices.map((v) => transformPoint(v, t)),
-  };
-}
-
 function drawObjectBounds2D(
   ctx: CanvasRenderingContext2D,
   vpKey: View2DKey,
@@ -250,6 +248,8 @@ export function drawSceneView2D(
   primDraw: PrimDrawState | null = null,
   grid: { snapSize: number; showGrid: boolean } = { snapSize: 5, showGrid: true },
   primActiveHandleId: string | null = null,
+  knifeDraw: KnifeDrawState | null = null,
+  gizmo: { mode: GizmoMode; pivot: Vec3; hoverAxis: GizmoAxis | null } | null = null,
 ): void {
   drawOrthoBackground(ctx, W, H, vpState, grid);
 
@@ -263,7 +263,7 @@ export function drawSceneView2D(
   };
 
   inactive.forEach((entry) => {
-    const worldMesh = meshInWorldSpace(entry.mesh, entry);
+    const worldMesh = meshInWorldSpace(entry.mesh, entry.transform);
     drawView2D(
       ctx,
       W,
@@ -289,7 +289,7 @@ export function drawSceneView2D(
   });
 
   if (active) {
-    const worldMesh = meshInWorldSpace(active.mesh, active);
+    const worldMesh = meshInWorldSpace(active.mesh, active.transform);
     const showMeshSelection = selectionMode !== 'object';
     drawView2D(
       ctx,
@@ -319,6 +319,22 @@ export function drawSceneView2D(
     drawCadPrimPreview2D(ctx, vpKey, primDraw, vpState.pan, vpState.zoom, primActiveHandleId);
   }
 
+  if (knifeDraw && knifeDraw.view === vpKey) {
+    drawKnifePreview2D(ctx, vpKey, knifeDraw, vpState.pan, vpState.zoom, active?.transform);
+  }
+
+  if (gizmo) {
+    drawTransformGizmo2D(
+      ctx,
+      vpKey,
+      gizmo.mode,
+      gizmo.pivot,
+      vpState.pan,
+      vpState.zoom,
+      gizmo.hoverAxis,
+    );
+  }
+
   if (selRect) {
     ctx.strokeStyle = MS3D_VIEW.selection;
     ctx.lineWidth = 1;
@@ -327,5 +343,79 @@ export function drawSceneView2D(
     ctx.fillStyle = 'rgba(110, 196, 208, 0.1)';
     ctx.fillRect(selRect.x, selRect.y, selRect.w, selRect.h);
     ctx.setLineDash([]);
+  }
+}
+
+export function drawKnifePreview2D(
+  ctx: CanvasRenderingContext2D,
+  vpKey: View2DKey,
+  draw: KnifeDrawState,
+  pan: { x: number; y: number },
+  zoom: number,
+  transform?: Transform,
+): void {
+  const vd = VIEW2D_DEFS[vpKey];
+  const preview = transform
+    ? knifeDrawForWorldPreview(draw, transform)
+    : draw;
+
+  const toScreen = (pt: { position: Vec3 }) => {
+    const p = vd.proj(pt.position);
+    return w2s(p.x, p.y, pan, zoom);
+  };
+
+  const confirmed = preview.points.map(toScreen);
+  const hover = preview.hover ? toScreen(preview.hover) : null;
+  const linePts = hover ? [...confirmed, hover] : confirmed;
+
+  if (linePts.length >= 2) {
+    ctx.strokeStyle = 'rgba(232, 90, 26, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(linePts[0].x, linePts[0].y);
+    for (let i = 1; i < linePts.length; i++) {
+      ctx.lineTo(linePts[i].x, linePts[i].y);
+    }
+    ctx.stroke();
+  }
+
+  confirmed.forEach((s, i) => {
+    const pt = preview.points[i];
+    const isNode = pt?.kind === 'node';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, isNode ? 5 : 4, 0, Math.PI * 2);
+    ctx.fillStyle = isNode ? '#38bdf8' : '#4ade80';
+    ctx.fill();
+    ctx.strokeStyle = isNode ? '#0c4a6e' : '#14532d';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  });
+
+  if (hover) {
+    const h = preview.hover!;
+    const snapColor =
+      h.kind === 'node' || h.reuseOf !== undefined
+        ? '#38bdf8'
+        : h.kind === 'vertex'
+          ? '#93c5fd'
+          : h.kind === 'edge'
+            ? '#fbbf24'
+            : '#ffffff';
+    const snapStroke =
+      h.kind === 'node' || h.reuseOf !== undefined
+        ? '#0c4a6e'
+        : h.kind === 'vertex'
+          ? '#1e3a8a'
+          : h.kind === 'edge'
+            ? '#92400e'
+            : '#e85a1a';
+    ctx.beginPath();
+    ctx.arc(hover.x, hover.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = snapColor;
+    ctx.fill();
+    ctx.strokeStyle = snapStroke;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   }
 }

@@ -3,20 +3,19 @@ import { FileBridge } from '@/components/layout/FileBridge';
 import { PrimDrawHUD } from '@/components/layout/PrimDrawHUD';
 import { StatusBar } from '@/components/layout/StatusBar';
 import SidePanel from '@/components/panels/SidePanel';
+import { ScenePanel } from '@/components/panels/ScenePanel';
 import { ViewportArea } from '@/components/viewports/ViewportArea';
 import { Modal } from '@/components/ui/Modal';
 import { useKeyboard } from '@/hooks/useKeyboard';
-import { useEditorStore } from '@/store/editorStore';
-
 export default function App() {
   useKeyboard();
-  const maximizedVP = useEditorStore((s) => s.maximizedVP);
 
   return (
     <div className="app-shell">
       <FileBridge />
       <MenuBar />
-      <div className={`app-main ${maximizedVP ? 'app-main--maximized' : ''}`}>
+      <div className="app-main">
+        <ScenePanel />
         <ViewportArea />
         <SidePanel />
         <PrimDrawHUD />

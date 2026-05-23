@@ -11,6 +11,7 @@ import {
 } from '@/systems/mesh/extrudeBlender';
 import { bevelEdgesBlender } from '@/systems/mesh/bevelBlender';
 import * as meshOps from '@/systems/mesh/meshOperations';
+import type { EdgeKey } from '@/systems/selection/selectionSystem';
 import type { View2DKey } from '@/core/math/projection';
 
 export const MODELING_DRAG_THRESHOLD = 4;
@@ -36,6 +37,10 @@ export interface ModelingDragState {
   /** Mesh state right after extrude prepare (distance = 0). */
   preparedSnapshot: EditorSnapshot | null;
   extrudeSession: ExtrudeSession | null;
+  /** Selection captured at drag start — applySnapshot clears live selection during preview. */
+  targetFaces: Set<number>;
+  targetEdges: Set<EdgeKey>;
+  groupSel: number;
 }
 
 export function createModelingDragState(): ModelingDragState {
@@ -46,7 +51,17 @@ export function createModelingDragState(): ModelingDragState {
     beforeSnapshot: null,
     preparedSnapshot: null,
     extrudeSession: null,
+    targetFaces: new Set(),
+    targetEdges: new Set(),
+    groupSel: 0,
   };
+}
+
+function captureModelingTargets(drag: ModelingDragState): void {
+  const state = useEditorStore.getState();
+  drag.targetFaces = new Set(state.selFaces);
+  drag.targetEdges = new Set(state.selEdges);
+  drag.groupSel = state.groupSel;
 }
 
 export function isModelingTool(tool: ToolId): boolean {
@@ -70,6 +85,9 @@ export function beginModelingPending(
   drag.beforeSnapshot = null;
   drag.preparedSnapshot = null;
   drag.extrudeSession = null;
+  drag.targetFaces = new Set();
+  drag.targetEdges = new Set();
+  drag.groupSel = 0;
 }
 
 export function tryStartModelingDrag(
@@ -95,11 +113,24 @@ export function tryStartModelingDrag(
       return false;
     }
     drag.extrudeSession = session;
+    captureModelingTargets(drag);
     drag.preparedSnapshot = state.getSnapshot();
     state.notifyChange();
     return true;
   }
 
+  if (tool === 'inset' && state.selFaces.size === 0) {
+    drag.isDragging = false;
+    drag.beforeSnapshot = null;
+    return false;
+  }
+  if (tool === 'bevel' && state.selEdges.size === 0) {
+    drag.isDragging = false;
+    drag.beforeSnapshot = null;
+    return false;
+  }
+
+  captureModelingTargets(drag);
   drag.preparedSnapshot = state.getSnapshot();
   return true;
 }
@@ -132,6 +163,52 @@ function dragAmount(
   return Math.min(0.45, Math.max(0.02, dy * 0.0015));
 }
 
+/** Start extrude/bevel immediately on click (after E/B modal arm). */
+export function startModalModelingDrag(
+  drag: ModelingDragState,
+  tool: ToolId,
+  sx: number,
+  sy: number,
+): boolean {
+  const state = useEditorStore.getState();
+  if (tool === 'extrude' && state.selFaces.size > 0) {
+    const session = prepareExtrude(state.getActiveMesh(), state.selFaces, state.groupSel);
+    if (!session) return false;
+    drag.beforeSnapshot = state.getSnapshot();
+    drag.isDragging = true;
+    drag.transformPending = false;
+    drag.mouseDownPos = { x: sx, y: sy };
+    captureModelingTargets(drag);
+    drag.extrudeSession = session;
+    drag.preparedSnapshot = state.getSnapshot();
+    state.notifyChange();
+    return true;
+  }
+  if (tool === 'bevel' && state.selEdges.size > 0) {
+    drag.beforeSnapshot = state.getSnapshot();
+    drag.isDragging = true;
+    drag.transformPending = false;
+    drag.mouseDownPos = { x: sx, y: sy };
+    drag.extrudeSession = null;
+    captureModelingTargets(drag);
+    drag.preparedSnapshot = state.getSnapshot();
+    state.notifyChange();
+    return true;
+  }
+  if (tool === 'inset' && state.selFaces.size > 0) {
+    drag.beforeSnapshot = state.getSnapshot();
+    drag.isDragging = true;
+    drag.transformPending = false;
+    drag.mouseDownPos = { x: sx, y: sy };
+    drag.extrudeSession = null;
+    captureModelingTargets(drag);
+    drag.preparedSnapshot = state.getSnapshot();
+    state.notifyChange();
+    return true;
+  }
+  return false;
+}
+
 export function applyModelingPreview(
   tool: ToolId,
   drag: ModelingDragState,
@@ -153,12 +230,13 @@ export function applyModelingPreview(
   if (!drag.preparedSnapshot) return;
   state.applySnapshot(drag.preparedSnapshot);
   const mesh = state.getActiveMesh();
-  const { groupSel, selFaces, selEdges } = state;
 
-  if (tool === 'inset' && selFaces.size > 0) {
-    meshOps.insetFaces(mesh, selFaces, groupSel, amount);
-  } else if (tool === 'bevel' && selEdges.size > 0) {
-    bevelEdgesBlender(mesh, selEdges, amount, groupSel);
+  if (tool === 'inset' && drag.targetFaces.size > 0) {
+    meshOps.insetFaces(mesh, drag.targetFaces, drag.groupSel, amount);
+    state.setSelFaces(new Set(drag.targetFaces));
+  } else if (tool === 'bevel' && drag.targetEdges.size > 0) {
+    bevelEdgesBlender(mesh, drag.targetEdges, amount, drag.groupSel);
+    state.setSelEdges(new Set(drag.targetEdges));
   }
   state.notifyChange();
 }

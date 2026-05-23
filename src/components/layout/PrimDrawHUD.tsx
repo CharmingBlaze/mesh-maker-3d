@@ -4,8 +4,10 @@ import { useEditorStore } from '@/store/editorStore';
 export function PrimDrawHUD() {
   const primDraw = useEditorStore((s) => s.primDraw);
   const snapSize = useEditorStore((s) => s.snapSize);
+  const primChainPlace = useEditorStore((s) => s.primChainPlace);
   const commitPrimDraw = useEditorStore((s) => s.commitPrimDraw);
   const cancelPrimDraw = useEditorStore((s) => s.cancelPrimDraw);
+  const setPrimChainPlace = useEditorStore((s) => s.setPrimChainPlace);
 
   if (!primDraw) return null;
 
@@ -21,6 +23,14 @@ export function PrimDrawHUD() {
         </span>
         <span className="prim-draw-hud__dims">{dims}</span>
       </div>
+      <label className="prim-draw-hud__chain">
+        <input
+          type="checkbox"
+          checked={primChainPlace}
+          onChange={(e) => setPrimChainPlace(e.target.checked)}
+        />
+        Chain place
+      </label>
       <div className="prim-draw-hud__actions">
         <button
           type="button"

@@ -57,6 +57,8 @@ function normalizeMesh(mesh: MeshDocument): MeshDocument {
     doc.materials = [{ name: 'Material 1', color: '#6f9df6', opacity: 0.9 }];
   }
   if (!doc.bones) doc.bones = [];
+  if (!doc.faceUvs) doc.faceUvs = [];
+  while (doc.faceUvs.length < doc.faces.length) doc.faceUvs.push(null);
   return doc;
 }
 

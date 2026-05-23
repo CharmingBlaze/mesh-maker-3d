@@ -1,14 +1,15 @@
 import type { View2DKey } from '@/core/math/projection';
+import type { ViewportSlotId } from '@/systems/viewport/viewportLayout';
 import { useViewport2D } from '@/hooks/useViewport2D';
 import { useEditorStore } from '@/store/editorStore';
 
-export function Viewport2D({ vpKey }: { vpKey: View2DKey }) {
-  const activeVP = useEditorStore((s) => s.activeVP);
+export function Viewport2D({ vpKey, slotId }: { vpKey: View2DKey; slotId: ViewportSlotId }) {
+  const activeSlot = useEditorStore((s) => s.activeSlot);
   const tool = useEditorStore((s) => s.tool);
   const primDraw = useEditorStore((s) => s.primDraw);
   const { canvasRef, containerRef, handlers, selRect } = useViewport2D(vpKey);
   const maximizedVP = useEditorStore((s) => s.maximizedVP);
-  const isActive = activeVP === vpKey || maximizedVP === vpKey;
+  const isActive = activeSlot === slotId || maximizedVP === slotId;
   const cursor = primDraw || tool !== 'select' ? 'crosshair' : 'default';
 
   return (

@@ -1,8 +1,9 @@
 import * as THREE from 'three';
+import type { Vec3 } from '@/core/math/Vec3';
 import type { BoundingBox } from '@/core/math/BoundingBox';
 import { boundsCenter, boundsCorners, boundsSize } from '@/core/math/BoundingBox';
 import type { MeshDocument } from '@/core/mesh/MeshDocument';
-import { parseEdgeKey, type EdgeKey } from '@/systems/selection/selectionSystem';
+import { parseEdgeKey, type EdgeKey, type SelectionMode } from '@/systems/selection/selectionSystem';
 import { MS3D_VIEW } from '@/systems/viewport/viewportColors';
 import {
   VIEWPORT_GRID_EXTENT,
@@ -19,7 +20,22 @@ import {
 import type { SceneRenderEntry } from '@/systems/scene/sceneObjectHelpers';
 import { meshWorldBounds } from '@/systems/scene/sceneObjectHelpers';
 import { visibleFaceIndices, visibleVertexIndices } from '@/systems/layers/layerSystem';
-import type { SelectionMode } from '@/systems/selection/selectionSystem';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import type { GizmoMode } from '@/systems/viewport/transformGizmo3D';
+import {
+  applyTransformControlsChange,
+  beginTransformControlsDrag,
+  commitTransformControlsDrag,
+  createTransformControlsSession,
+  type TransformControlsSession,
+} from '@/systems/viewport/transformControlsBridge';
+import { applyTransformControlsTheme } from '@/systems/viewport/transformGizmoTheme';
+import { ensureFaceUvsArray, uvForThree } from '@/core/mesh/faceUv';
+import { drawDataUrlToCanvas } from '@/core/mesh/textureMap';
+
+/** Instanced vertex cube size in the 3D (perspective) viewport — world units. */
+const PERSP_VERT_SIZE = 0.65;
+const PERSP_VERT_SELECTED_SIZE = 1;
 
 export class Viewport3DRenderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -28,6 +44,9 @@ export class Viewport3DRenderer {
   readonly meshGroup: THREE.Group;
   readonly vertGroup: THREE.Group;
   readonly previewGroup: THREE.Group;
+  readonly pivotObject: THREE.Object3D;
+  readonly transformControls: TransformControls;
+  private transformSession: TransformControlsSession;
   private grid3d: THREE.GridHelper;
   private gridSnapSize = 5;
   readonly orbitCamera = new OrbitCamera();
@@ -37,6 +56,11 @@ export class Viewport3DRenderer {
   private lastRebuildKey = '';
   private needsRender = true;
   private primActiveHandleId: string | null = null;
+  private atlasTexture: THREE.Texture | null = null;
+  private atlasTextureKey = '';
+  private atlasLiveCanvas: HTMLCanvasElement | null = null;
+  /** True when atlasLiveCanvas was updated by live painting (skip async reload on commit). */
+  private atlasLiveDirty = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -46,7 +70,7 @@ export class Viewport3DRenderer {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
-    this.updateCamera();
+    this.orbitCamera.applyTo(this.camera);
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.35));
     const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -70,6 +94,77 @@ export class Viewport3DRenderer {
     this.scene.add(this.meshGroup);
     this.scene.add(this.vertGroup);
     this.scene.add(this.previewGroup);
+
+    this.pivotObject = new THREE.Object3D();
+    this.scene.add(this.pivotObject);
+
+    this.transformSession = createTransformControlsSession();
+    this.transformControls = new TransformControls(this.camera, canvas);
+    this.transformControls.space = 'world';
+    this.scene.add(this.transformControls.getHelper());
+
+    this.transformControls.addEventListener('mouseDown', () => {
+      if (!this.transformControls.object) return;
+      beginTransformControlsDrag(
+        this.transformSession,
+        this.pivotObject,
+        this.transformControls.mode as 'translate' | 'rotate' | 'scale',
+      );
+    });
+    this.transformControls.addEventListener('objectChange', () => {
+      applyTransformControlsChange(this.transformSession, this.pivotObject);
+    });
+    this.transformControls.addEventListener('mouseUp', () => {
+      commitTransformControlsDrag(this.transformSession);
+      this.resetPivotObject();
+    });
+
+    applyTransformControlsTheme(this.transformControls);
+
+    this.updateCamera();
+  }
+
+  isTransformGizmoDragging(): boolean {
+    return this.transformControls.dragging;
+  }
+
+  setTransformGizmo(
+    mode: GizmoMode | null,
+    pivot: Vec3 | null,
+    translationSnap: number | null = null,
+  ): void {
+    if (this.transformControls.dragging) {
+      this.needsRender = true;
+      return;
+    }
+
+    if (!mode || !pivot) {
+      this.transformControls.detach();
+      this.transformControls.enabled = false;
+      this.pivotObject.visible = false;
+      this.needsRender = true;
+      return;
+    }
+
+    this.resetPivotObject(pivot);
+    this.pivotObject.visible = true;
+    this.transformControls.enabled = true;
+    this.transformControls.setMode(
+      mode === 'move' ? 'translate' : mode === 'rotate' ? 'rotate' : 'scale',
+    );
+    this.transformControls.setSize(1);
+    this.transformControls.setTranslationSnap(translationSnap);
+    this.transformControls.attach(this.pivotObject);
+    this.needsRender = true;
+  }
+
+  private resetPivotObject(pivot?: Vec3): void {
+    if (pivot) {
+      this.pivotObject.position.set(pivot.x, pivot.y, pivot.z);
+    }
+    this.pivotObject.rotation.set(0, 0, 0);
+    this.pivotObject.scale.set(1, 1, 1);
+    this.pivotObject.updateMatrixWorld(true);
   }
 
   private addCadBoxToGroup(bounds: BoundingBox): void {
@@ -202,29 +297,53 @@ export class Viewport3DRenderer {
 
   private createHandleMesh(handle: PrimDrawHandle, active: boolean): THREE.Object3D {
     const { position, kind } = handle;
+    const group = new THREE.Group();
+    group.position.set(position.x, position.y, position.z);
+
     if (kind === 'center') {
-      const group = new THREE.Group();
-      group.position.set(position.x, position.y, position.z);
       const mat = new THREE.MeshBasicMaterial({ color: active ? 0xe85a1a : 0x667a90 });
-      group.add(new THREE.Mesh(new THREE.SphereGeometry(1.2, 8, 8), mat));
+      group.add(new THREE.Mesh(new THREE.SphereGeometry(active ? 1.6 : 1.2, 10, 10), mat));
+      if (active) {
+        group.add(
+          new THREE.Mesh(
+            new THREE.SphereGeometry(2.6, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.7 }),
+          ),
+        );
+      }
       return group;
     }
 
     const size =
-      kind === 'extent' ? (active ? 3.2 : 2.8) : kind === 'corner' ? (active ? 2.4 : 2) : active ? 2.2 : 1.8;
+      kind === 'extent' ? (active ? 3.6 : 2.8) : kind === 'corner' ? (active ? 2.8 : 2) : active ? 2.6 : 1.8;
     const color =
-      kind === 'extent' ? (active ? 0x9ee4ef : 0x6ec4d0) : active ? 0xe85a1a : 0xe8eef4;
+      kind === 'extent' ? (active ? 0xb8f4ff : 0x6ec4d0) : active ? 0xff8a4a : 0xe8eef4;
     const geo =
       kind === 'extent' && handle.axis === 'y'
-        ? new THREE.BoxGeometry(size, size * 1.6, size)
+        ? new THREE.BoxGeometry(size, size * 1.75, size)
         : kind === 'extent' && handle.axis === 'x'
-          ? new THREE.BoxGeometry(size * 1.6, size, size)
+          ? new THREE.BoxGeometry(size * 1.75, size, size)
           : kind === 'extent' && handle.axis === 'z'
-            ? new THREE.BoxGeometry(size, size, size * 1.6)
+            ? new THREE.BoxGeometry(size, size, size * 1.75)
             : new THREE.BoxGeometry(size, size, size);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color }));
-    mesh.position.set(position.x, position.y, position.z);
-    return mesh;
+    group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color })));
+
+    if (active) {
+      const haloScale = kind === 'extent' ? 1.55 : 1.45;
+      const halo = new THREE.Mesh(
+        geo.clone(),
+        new THREE.MeshBasicMaterial({
+          color: kind === 'extent' ? 0xffffff : 0xe85a1a,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.9,
+        }),
+      );
+      halo.scale.set(haloScale, haloScale, haloScale);
+      group.add(halo);
+    }
+
+    return group;
   }
 
   /** CAD construction box with primitive shape visible inside. */
@@ -242,6 +361,60 @@ export class Viewport3DRenderer {
     this.requestRender();
   }
 
+  setKnifePreview(draw: import('@/systems/mesh/knifeDraw').KnifeDrawState | null): void {
+    this.clearGroup(this.previewGroup);
+    if (!draw) {
+      this.requestRender();
+      return;
+    }
+
+    const linePts = draw.hover
+      ? [...draw.points, draw.hover].map((p) => p.position)
+      : draw.points.map((p) => p.position);
+
+    if (linePts.length >= 2) {
+      const vecs = linePts.map((p) => new THREE.Vector3(p.x, p.y, p.z));
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(vecs),
+        new THREE.LineBasicMaterial({
+          color: 0xe85a1a,
+          transparent: true,
+          opacity: 0.95,
+        }),
+      );
+      this.previewGroup.add(line);
+    }
+
+    draw.points.forEach((pt) => {
+      const isNode = pt.kind === 'node';
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(isNode ? 0.36 : 0.32, 8, 8),
+        new THREE.MeshBasicMaterial({ color: isNode ? 0x38bdf8 : 0x4ade80 }),
+      );
+      dot.position.set(pt.position.x, pt.position.y, pt.position.z);
+      this.previewGroup.add(dot);
+    });
+
+    if (draw.hover) {
+      const snapColor =
+        draw.hover.kind === 'node' || draw.hover.reuseOf !== undefined
+          ? 0x38bdf8
+          : draw.hover.kind === 'vertex'
+            ? 0x93c5fd
+            : draw.hover.kind === 'edge'
+              ? 0xfbbf24
+              : 0xffffff;
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.38, 8, 8),
+        new THREE.MeshBasicMaterial({ color: snapColor }),
+      );
+      dot.position.set(draw.hover.position.x, draw.hover.position.y, draw.hover.position.z);
+      this.previewGroup.add(dot);
+    }
+
+    this.requestRender();
+  }
+
   setBoundsPreview(bounds: BoundingBox | null): void {
     this.clearGroup(this.previewGroup);
     if (bounds) this.addCadBoxToGroup(bounds);
@@ -255,6 +428,8 @@ export class Viewport3DRenderer {
 
   updateCamera(): void {
     this.orbitCamera.applyTo(this.camera);
+    this.transformControls.camera = this.camera;
+    this.needsRender = true;
   }
 
   orbit(deltaX: number, deltaY: number, viewportHeight: number): void {
@@ -297,6 +472,202 @@ export class Viewport3DRenderer {
 
   setGridVisible(visible: boolean): void {
     this.setSnapGrid(this.gridSnapSize, visible);
+  }
+
+  private createAtlasTexture(): THREE.Texture {
+    const map = new THREE.Texture();
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.magFilter = THREE.NearestFilter;
+    map.minFilter = THREE.NearestFilter;
+    map.wrapS = THREE.ClampToEdgeWrapping;
+    map.wrapT = THREE.ClampToEdgeWrapping;
+    map.generateMipmaps = false;
+    return map;
+  }
+
+  private textureCacheKey(tex: NonNullable<MeshDocument['texture']>): string {
+    return `${tex.width}x${tex.height}:${tex.dataUrl.length}:${tex.dataUrl.slice(-48)}`;
+  }
+
+  private ensureAtlasTexture(mesh: MeshDocument): THREE.Texture | null {
+    const tex = mesh.texture;
+    if (!tex) return null;
+    const key = this.textureCacheKey(tex);
+    if (this.atlasTexture && this.atlasTextureKey === key) return this.atlasTexture;
+
+    if (!this.atlasTexture) this.atlasTexture = this.createAtlasTexture();
+    if (
+      !this.atlasLiveCanvas ||
+      this.atlasLiveCanvas.width !== tex.width ||
+      this.atlasLiveCanvas.height !== tex.height
+    ) {
+      this.atlasLiveCanvas = document.createElement('canvas');
+      this.atlasLiveCanvas.width = tex.width;
+      this.atlasLiveCanvas.height = tex.height;
+      this.atlasLiveDirty = false;
+    }
+
+    const canvas = this.atlasLiveCanvas;
+    this.atlasTexture.image = canvas;
+
+    const finish = () => {
+      if (!this.atlasTexture) return;
+      this.atlasTexture.needsUpdate = true;
+      this.atlasTextureKey = key;
+      this.atlasLiveDirty = false;
+      this.needsRender = true;
+    };
+
+    // Live painting already uploaded pixels — keep them when the mesh rebuilds on commit.
+    if (this.atlasLiveDirty) {
+      finish();
+      return this.atlasTexture;
+    }
+
+    if (drawDataUrlToCanvas(tex.dataUrl, canvas, tex.width, tex.height)) {
+      finish();
+      return this.atlasTexture;
+    }
+
+    const img = new Image();
+    img.onload = () => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, tex.width, tex.height);
+      ctx.drawImage(img, 0, 0, tex.width, tex.height);
+      finish();
+    };
+    img.onerror = () => {
+      this.needsRender = true;
+    };
+    img.src = tex.dataUrl;
+
+    return this.atlasTexture;
+  }
+
+  /** Push pixel edits to the GPU during texture painting without a full scene rebuild. */
+  updateLiveAtlasFromCanvas(source: CanvasImageSource, width: number, height: number): void {
+    if (!this.atlasTexture) this.atlasTexture = this.createAtlasTexture();
+    if (
+      !this.atlasLiveCanvas ||
+      this.atlasLiveCanvas.width !== width ||
+      this.atlasLiveCanvas.height !== height
+    ) {
+      this.atlasLiveCanvas = document.createElement('canvas');
+      this.atlasLiveCanvas.width = width;
+      this.atlasLiveCanvas.height = height;
+      this.atlasTexture.image = this.atlasLiveCanvas;
+    }
+    const ctx = this.atlasLiveCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0, width, height);
+    this.atlasLiveDirty = true;
+    this.atlasTexture.needsUpdate = true;
+    this.needsRender = true;
+  }
+
+  private addTexturedMesh(
+    mesh: MeshDocument,
+    visibleFaces: Set<number>,
+    flatShading: boolean,
+    targetGroup: THREE.Group = this.meshGroup,
+  ): void {
+    const map = this.ensureAtlasTexture(mesh);
+    if (!map) return;
+    ensureFaceUvsArray(mesh);
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const norms: number[] = [];
+    const idxArr: number[] = [];
+    mesh.faces.forEach((f, fi) => {
+      if (!f || f.length < 3 || !visibleFaces.has(fi)) return;
+      const uvMap = mesh.faceUvs[fi];
+      if (!uvMap) return;
+      const verts = f.map((vi) => mesh.vertices[vi]);
+      const v0 = new THREE.Vector3(verts[0].x, verts[0].y, verts[0].z);
+      for (let i = 1; i < verts.length - 1; i++) {
+        const tri = [0, i, i + 1];
+        const base = pos.length / 3;
+        tri.forEach((ti) => {
+          const v = verts[ti];
+          pos.push(v.x, v.y, v.z);
+          const vi = f[ti];
+          const tuv = uvMap[vi] ?? { u: 0, v: 0 };
+          const glUv = uvForThree(tuv.u, tuv.v);
+          uv.push(glUv.u, glUv.v);
+        });
+        const v1 = new THREE.Vector3(verts[i].x, verts[i].y, verts[i].z);
+        const v2 = new THREE.Vector3(verts[i + 1].x, verts[i + 1].y, verts[i + 1].z);
+        const n = new THREE.Vector3()
+          .crossVectors(v1.clone().sub(v0), v2.clone().sub(v0))
+          .normalize();
+        norms.push(n.x, n.y, n.z, n.x, n.y, n.z, n.x, n.y, n.z);
+        idxArr.push(base, base + 1, base + 2);
+      }
+    });
+    if (pos.length === 0) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
+    geo.setIndex(idxArr);
+    if (flatShading) geo.computeVertexNormals();
+    const mat = new THREE.MeshPhongMaterial({
+      map,
+      side: THREE.DoubleSide,
+      transparent: false,
+      shininess: 20,
+      flatShading,
+    });
+    targetGroup.add(new THREE.Mesh(geo, mat));
+    const edges = new THREE.EdgesGeometry(geo, 15);
+    targetGroup.add(
+      new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({ color: 0x253545, transparent: true, opacity: 0.45 }),
+      ),
+    );
+  }
+
+  /** Blender-style UV face outlines on the 3D mesh when a texture atlas is active. */
+  private addUvWireframeOverlay(
+    group: THREE.Group,
+    mesh: MeshDocument,
+    visibleFaces: Set<number>,
+    selFaces: Set<number>,
+  ): void {
+    if (!mesh.texture) return;
+    ensureFaceUvsArray(mesh);
+    mesh.faces.forEach((face, fi) => {
+      if (!face || face.length < 3 || !visibleFaces.has(fi)) return;
+      const uvMap = mesh.faceUvs[fi];
+      if (!uvMap || Object.keys(uvMap).length === 0) return;
+      const points: number[] = [];
+      face.forEach((vi) => {
+        const v = mesh.vertices[vi];
+        if (!v) return;
+        points.push(v.x, v.y, v.z);
+      });
+      if (points.length < 9) return;
+      const v0 = mesh.vertices[face[0]];
+      if (v0) points.push(v0.x, v0.y, v0.z);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+      const selected = selFaces.has(fi);
+      group.add(
+        new THREE.Line(
+          geo,
+          new THREE.LineBasicMaterial({
+            color: selected ? 0xe85a1a : 0x6ec4d0,
+            transparent: true,
+            opacity: selected ? 0.95 : 0.4,
+          }),
+        ),
+      );
+    });
   }
 
   /** Skip GPU rebuild when mesh/selection/display state unchanged (large-scene optimization). */
@@ -386,15 +757,22 @@ export class Viewport3DRenderer {
       if (selF.length > 0) buildMeshForFaces(selF, color, true);
     };
 
-    mesh.groups.forEach((g) => {
-      const visibleGroupFaces = g.faces.filter((fi) => visibleFaces.has(fi));
-      if (visibleGroupFaces.length > 0) buildMeshForFaces(visibleGroupFaces, g.color);
-    });
-    const assigned = new Set(mesh.groups.flatMap((g) => g.faces));
-    const unassigned = mesh.faces
-      .map((_, fi) => fi)
-      .filter((fi) => visibleFaces.has(fi) && !assigned.has(fi) && mesh.faces[fi] && mesh.faces[fi]!.length >= 3);
-    if (unassigned.length > 0) buildMeshForFaces(unassigned, '#888888');
+    if (mesh.texture && !wireframe) {
+      this.addTexturedMesh(mesh, visibleFaces, flatShading);
+      this.addUvWireframeOverlay(this.meshGroup, mesh, visibleFaces, selFaces);
+      const selF = [...selFaces].filter((fi) => visibleFaces.has(fi));
+      if (selF.length > 0) buildMeshForFaces(selF, '#e85a1a', true);
+    } else {
+      mesh.groups.forEach((g) => {
+        const visibleGroupFaces = g.faces.filter((fi) => visibleFaces.has(fi));
+        if (visibleGroupFaces.length > 0) buildMeshForFaces(visibleGroupFaces, g.color);
+      });
+      const assigned = new Set(mesh.groups.flatMap((g) => g.faces));
+      const unassigned = mesh.faces
+        .map((_, fi) => fi)
+        .filter((fi) => visibleFaces.has(fi) && !assigned.has(fi) && mesh.faces[fi] && mesh.faces[fi]!.length >= 3);
+      if (unassigned.length > 0) buildMeshForFaces(unassigned, '#888888');
+    }
 
     if (selEdges.size > 0) {
       const points: number[] = [];
@@ -441,7 +819,7 @@ export class Viewport3DRenderer {
       this.vertGroup.add(instanced);
     };
 
-    addVertexInstances(selectedVerts, 5, 0xff6b20);
+    addVertexInstances(selectedVerts, PERSP_VERT_SELECTED_SIZE, 0xff6b20);
     this.needsRender = true;
   }
 
@@ -602,15 +980,22 @@ export class Viewport3DRenderer {
       if (selF.length > 0) buildMeshForFaces(selF, color, true);
     };
 
-    mesh.groups.forEach((g) => {
-      const visibleGroupFaces = g.faces.filter((fi) => visibleFaces.has(fi));
-      if (visibleGroupFaces.length > 0) buildMeshForFaces(visibleGroupFaces, g.color);
-    });
-    const assigned = new Set(mesh.groups.flatMap((g) => g.faces));
-    const unassigned = mesh.faces
-      .map((_, fi) => fi)
-      .filter((fi) => visibleFaces.has(fi) && !assigned.has(fi) && mesh.faces[fi] && mesh.faces[fi]!.length >= 3);
-    if (unassigned.length > 0) buildMeshForFaces(unassigned, '#888888');
+    if (mesh.texture && !wireframe) {
+      this.addTexturedMesh(mesh, visibleFaces, flatShading, group);
+      this.addUvWireframeOverlay(group, mesh, visibleFaces, selFaces);
+      const selF = [...selFaces].filter((fi) => visibleFaces.has(fi));
+      if (selF.length > 0) buildMeshForFaces(selF, '#e85a1a', true);
+    } else {
+      mesh.groups.forEach((g) => {
+        const visibleGroupFaces = g.faces.filter((fi) => visibleFaces.has(fi));
+        if (visibleGroupFaces.length > 0) buildMeshForFaces(visibleGroupFaces, g.color);
+      });
+      const assigned = new Set(mesh.groups.flatMap((g) => g.faces));
+      const unassigned = mesh.faces
+        .map((_, fi) => fi)
+        .filter((fi) => visibleFaces.has(fi) && !assigned.has(fi) && mesh.faces[fi] && mesh.faces[fi]!.length >= 3);
+      if (unassigned.length > 0) buildMeshForFaces(unassigned, '#888888');
+    }
 
     if (selEdges.size > 0) {
       const points: number[] = [];
@@ -664,8 +1049,8 @@ export class Viewport3DRenderer {
       group.add(instanced);
     };
 
-    addVertexInstances(normalVerts, 3, 0x6ec4d0);
-    addVertexInstances(selectedVerts, 5, 0xff6b20);
+    addVertexInstances(normalVerts, PERSP_VERT_SIZE, 0x6ec4d0);
+    addVertexInstances(selectedVerts, PERSP_VERT_SELECTED_SIZE, 0xff6b20);
   }
 
   invalidateMesh(): void {
@@ -676,12 +1061,14 @@ export class Viewport3DRenderer {
     while (group.children.length) {
       const child = group.children[0];
       group.remove(child);
-      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.InstancedMesh) {
-        child.geometry.dispose();
-        const mat = child.material;
-        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-        else mat.dispose();
-      }
+      child.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.InstancedMesh) {
+          obj.geometry.dispose();
+          const mat = obj.material;
+          if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+          else mat.dispose();
+        }
+      });
     }
   }
 
@@ -696,8 +1083,13 @@ export class Viewport3DRenderer {
   }
 
   render(): void {
-    if (!this.needsRender) return;
+    const gizmoActive =
+      this.transformControls.enabled && this.transformControls.object !== undefined;
+    if (!this.needsRender && !gizmoActive) return;
     this.needsRender = false;
+    if (gizmoActive) {
+      this.pivotObject.updateMatrixWorld(true);
+    }
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -717,6 +1109,14 @@ export class Viewport3DRenderer {
 
   dispose(): void {
     cancelAnimationFrame(this.animId);
+    this.transformControls.dispose();
+    if (this.atlasTexture) {
+      this.atlasTexture.dispose();
+      this.atlasTexture = null;
+    }
+    this.atlasLiveCanvas = null;
+    this.atlasTextureKey = '';
+    this.atlasLiveDirty = false;
     this.renderer.dispose();
   }
 }

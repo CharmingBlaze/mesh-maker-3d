@@ -10,6 +10,7 @@ import {
   type ScreenRect,
   type SelectionMode,
 } from '@/systems/selection/selectionSystem';
+import { edgeClickSelection } from '@/systems/selection/edgeLoopRing';
 
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
@@ -131,6 +132,60 @@ export function pickFaceMesh3D(
   return best;
 }
 
+export interface MeshSurfaceHit {
+  position: Vec3;
+  faceIndex: number;
+}
+
+/** Raycast pick — front-most face hit with world intersection point. */
+export function raycastMeshSurface(
+  camera: THREE.PerspectiveCamera,
+  canvas: HTMLCanvasElement,
+  mesh: MeshDocument,
+  sx: number,
+  sy: number,
+  visibleFaces: Set<number>,
+): MeshSurfaceHit | null {
+  ndcFromCanvas(canvas, sx, sy, ndc);
+  raycaster.setFromCamera(ndc, camera);
+  const ray = raycaster.ray;
+  let best: MeshSurfaceHit | null = null;
+  let bestT = Infinity;
+  mesh.faces.forEach((face, fi) => {
+    if (!visibleFaces.has(fi) || !face || face.length < 3) return;
+    const v0 = mesh.vertices[face[0]];
+    for (let i = 1; i < face.length - 1; i++) {
+      const t = rayTriangleHit(ray, v0, mesh.vertices[face[i]], mesh.vertices[face[i + 1]]);
+      if (t !== null && t < bestT) {
+        bestT = t;
+        best = {
+          position: {
+            x: ray.origin.x + ray.direction.x * t,
+            y: ray.origin.y + ray.direction.y * t,
+            z: ray.origin.z + ray.direction.z * t,
+          },
+          faceIndex: fi,
+        };
+      }
+    }
+  });
+  return best;
+}
+
+export function closestPointOnSegment(a: Vec3, b: Vec3, p: Vec3): { point: Vec3; t: number } {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const lenSq = abx * abx + aby * aby + abz * abz;
+  if (lenSq < 1e-12) return { point: { ...a }, t: 0 };
+  let t = ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return {
+    point: { x: a.x + abx * t, y: a.y + aby * t, z: a.z + abz * t },
+    t,
+  };
+}
+
 export function nearestFaceScreen(
   camera: THREE.PerspectiveCamera,
   canvas: HTMLCanvasElement,
@@ -179,6 +234,9 @@ export function nearestEdgeScreen(
   visibleFaces: Set<number>,
   threshold = 10,
 ): EdgeKey | null {
+  const rayHit = nearestEdgeRay(camera, canvas, mesh, sx, sy, visibleVerts, visibleFaces, threshold);
+  if (rayHit) return rayHit;
+
   let best: EdgeKey | null = null;
   let bestD = threshold;
   mesh.faces.forEach((face, fi) => {
@@ -202,6 +260,89 @@ export function nearestEdgeScreen(
   return best;
 }
 
+const edgeRay = new THREE.Raycaster();
+const edgeNdc = new THREE.Vector2();
+const edgeTmpA = new THREE.Vector3();
+const edgeTmpB = new THREE.Vector3();
+const edgeTmpAB = new THREE.Vector3();
+const edgeTmpAO = new THREE.Vector3();
+
+function raySegmentDistance(ray: THREE.Ray, a: Vec3, b: Vec3): number {
+  edgeTmpA.set(a.x, a.y, a.z);
+  edgeTmpB.set(b.x, b.y, b.z);
+  edgeTmpAB.subVectors(edgeTmpB, edgeTmpA);
+  edgeTmpAO.subVectors(edgeTmpA, ray.origin);
+
+  const abDotAb = edgeTmpAB.dot(edgeTmpAB);
+  if (abDotAb < 1e-12) {
+    return ray.origin.distanceTo(edgeTmpA);
+  }
+
+  const dDotAb = ray.direction.dot(edgeTmpAB);
+  const aoDotAb = edgeTmpAO.dot(edgeTmpAB);
+  const dDotD = ray.direction.dot(ray.direction);
+  const aoDotD = edgeTmpAO.dot(ray.direction);
+
+  const denom = abDotAb * dDotD - dDotAb * dDotAb;
+  let segT = denom !== 0 ? (dDotAb * aoDotD - aoDotAb * dDotD) / denom : 0;
+  segT = Math.max(0, Math.min(1, segT));
+
+  let rayT = (dDotAb * segT - aoDotD) / dDotD;
+  rayT = Math.max(0, rayT);
+
+  const closestSeg = edgeTmpA.clone().add(edgeTmpAB.clone().multiplyScalar(segT));
+  const closestRay = ray.origin.clone().add(ray.direction.clone().multiplyScalar(rayT));
+  return closestSeg.distanceTo(closestRay);
+}
+
+/** Raycast pick — closest visible mesh edge to the cursor ray. */
+export function nearestEdgeRay(
+  camera: THREE.PerspectiveCamera,
+  canvas: HTMLCanvasElement,
+  mesh: MeshDocument,
+  sx: number,
+  sy: number,
+  visibleVerts: Set<number>,
+  visibleFaces: Set<number>,
+  thresholdPx = 12,
+): EdgeKey | null {
+  const rect = canvas.getBoundingClientRect();
+  edgeNdc.x = (sx / rect.width) * 2 - 1;
+  edgeNdc.y = -(sy / rect.height) * 2 + 1;
+  edgeRay.setFromCamera(edgeNdc, camera);
+
+  let best: EdgeKey | null = null;
+  let bestScore = Infinity;
+  const seen = new Set<string>();
+
+  mesh.faces.forEach((face, fi) => {
+    if (!visibleFaces.has(fi) || !face) return;
+    face.forEach((vi, index) => {
+      const next = face[(index + 1) % face.length];
+      if (!visibleVerts.has(vi) || !visibleVerts.has(next)) return;
+      const key = makeEdgeKey(vi, next);
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const a = mesh.vertices[vi];
+      const b = mesh.vertices[next];
+      const dist = raySegmentDistance(edgeRay.ray, a, b);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+      const midVec = new THREE.Vector3(mid.x, mid.y, mid.z);
+      const depth = camera.position.distanceTo(midVec);
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const worldThreshold = (thresholdPx / rect.height) * depth * 2 * Math.tan(fovRad / 2);
+
+      if (dist <= worldThreshold && dist < bestScore) {
+        bestScore = dist;
+        best = key;
+      }
+    });
+  });
+
+  return best;
+}
+
 export interface ClickSelection3DInput {
   mesh: MeshDocument;
   camera: THREE.PerspectiveCamera;
@@ -214,6 +355,7 @@ export interface ClickSelection3DInput {
   selFaces: Set<number>;
   shiftKey: boolean;
   ctrlKey?: boolean;
+  altKey?: boolean;
   visibleVerts: Set<number>;
   visibleFaces: Set<number>;
 }
@@ -231,6 +373,7 @@ export function applyClickSelection3D(input: ClickSelection3DInput): ClickSelect
     selFaces,
     shiftKey,
     ctrlKey = false,
+    altKey = false,
     visibleVerts,
     visibleFaces,
   } = input;
@@ -266,14 +409,15 @@ export function applyClickSelection3D(input: ClickSelection3DInput): ClickSelect
   if (selectionMode === 'edge') {
     const edge = nearestEdgeScreen(camera, canvas, mesh, sx, sy, visibleVerts, visibleFaces);
     if (edge) {
-      const newSel = new Set(selEdges);
-      if (additive) {
-        if (newSel.has(edge)) newSel.delete(edge);
-        else newSel.add(edge);
-      } else {
-        newSel.clear();
-        newSel.add(edge);
-      }
+      const newSel = edgeClickSelection(
+        mesh,
+        edge,
+        selEdges,
+        shiftKey,
+        ctrlKey,
+        altKey,
+        visibleVerts,
+      );
       return { selVerts: new Set(), selEdges: newSel, selFaces: new Set() };
     }
     if (!additive) return { selVerts: new Set(), selEdges: new Set(), selFaces: new Set() };

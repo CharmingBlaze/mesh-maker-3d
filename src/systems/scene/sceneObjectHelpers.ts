@@ -44,8 +44,78 @@ export function getMeshNodes(sceneGraph: SceneGraph): SceneNodeData[] {
   return sceneGraph.getAllNodes().filter((n) => n.type === 'mesh' && n.meshId);
 }
 
+export function sceneMeshIds(sceneGraph: SceneGraph): Set<string> {
+  return new Set(
+    getMeshNodes(sceneGraph)
+      .map((n) => n.meshId)
+      .filter((id): id is string => !!id),
+  );
+}
+
+/** Meshes referenced by scene objects. */
+export function meshesInScene(meshes: MeshesRecord, sceneGraph: SceneGraph): MeshDocument[] {
+  const ids = sceneMeshIds(sceneGraph);
+  return Object.values(meshes).filter((m) => ids.has(m.id));
+}
+
+export function resolveActiveMeshId(
+  meshes: MeshesRecord,
+  sceneGraph: SceneGraph,
+  preferredId?: string,
+): string {
+  if (preferredId && meshes[preferredId]) return preferredId;
+  return getMeshNodes(sceneGraph)[0]?.meshId ?? '';
+}
+
 export function getNodeForMeshId(sceneGraph: SceneGraph, meshId: string): SceneNodeData | undefined {
   return getMeshNodes(sceneGraph).find((n) => n.meshId === meshId);
+}
+
+export function isIdentityTransform(t: Transform): boolean {
+  return (
+    t.position.x === 0 &&
+    t.position.y === 0 &&
+    t.position.z === 0 &&
+    t.rotation.x === 0 &&
+    t.rotation.y === 0 &&
+    t.rotation.z === 0 &&
+    t.scale.x === 1 &&
+    t.scale.y === 1 &&
+    t.scale.z === 1
+  );
+}
+
+/** Mesh with vertices transformed into world space for viewport hit-testing. */
+export function meshInWorldSpace(mesh: MeshDocument, transform: Transform): MeshDocument {
+  if (isIdentityTransform(transform)) return mesh;
+  return {
+    ...mesh,
+    vertices: mesh.vertices.map((v) => transformPoint(v, transform)),
+  };
+}
+
+export function getActiveSceneEntry(
+  sceneGraph: SceneGraph,
+  meshes: MeshesRecord,
+  activeMeshId: string,
+): SceneRenderEntry | undefined {
+  return buildSceneRenderEntries(sceneGraph, meshes, activeMeshId, new Set()).find((e) => e.isActive);
+}
+
+export function meshForViewportPick(
+  sceneGraph: SceneGraph,
+  meshes: MeshesRecord,
+  activeMeshId: string,
+): MeshDocument | null {
+  if (getMeshNodes(sceneGraph).length === 0) return null;
+  const mesh = activeMeshId ? meshes[activeMeshId] : undefined;
+  if (!mesh) return null;
+  const entry = getActiveSceneEntry(sceneGraph, meshes, activeMeshId);
+  return meshInWorldSpace(mesh, entry?.transform ?? {
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 },
+  });
 }
 
 export function getMeshForNode(meshes: MeshesRecord, node: SceneNodeData): MeshDocument | null {
@@ -90,6 +160,45 @@ export function transformPoint(v: Vec3, t: Transform): Vec3 {
     x: x + t.position.x,
     y: y + t.position.y,
     z: z + t.position.z,
+  };
+}
+
+/** Inverse of {@link transformPoint} — world space back to mesh local space. */
+export function inverseTransformPoint(v: Vec3, t: Transform): Vec3 {
+  let x = v.x - t.position.x;
+  let y = v.y - t.position.y;
+  let z = v.z - t.position.z;
+
+  const rx = t.rotation.x * DEG;
+  const ry = t.rotation.y * DEG;
+  const rz = t.rotation.z * DEG;
+
+  if (rz !== 0) {
+    const cz = Math.cos(rz);
+    const sz = Math.sin(rz);
+    const nx = x * cz + y * sz;
+    y = -x * sz + y * cz;
+    x = nx;
+  }
+  if (ry !== 0) {
+    const cy = Math.cos(ry);
+    const sy = Math.sin(ry);
+    const nx = x * cy - z * sy;
+    z = x * sy + z * cy;
+    x = nx;
+  }
+  if (rx !== 0) {
+    const cy = Math.cos(rx);
+    const sy = Math.sin(rx);
+    const ny = y * cy + z * sy;
+    z = -y * sy + z * cy;
+    y = ny;
+  }
+
+  return {
+    x: x / t.scale.x,
+    y: y / t.scale.y,
+    z: z / t.scale.z,
   };
 }
 

@@ -1,24 +1,32 @@
-import type { ViewportId } from '@/systems/viewport/viewportLayout';
-import { VIEWPORT_LABELS } from '@/systems/viewport/viewportLayout';
-import { useEditorStore } from '@/store/editorStore';
+import type { ViewportSlotId } from '@/systems/viewport/viewportLayout';
+import { isView2DKey, VIEWPORT_LABELS } from '@/systems/viewport/viewportLayout';import { useEditorStore } from '@/store/editorStore';
 import { Viewport2D } from './Viewport2D';
 import { Viewport3D } from './Viewport3D';
+import { ViewportTexture } from './ViewportTexture';
+import { ViewportViewPicker } from './ViewportViewPicker';
 
-export function ViewportPanel({ id }: { id: ViewportId }) {
-  const activeVP = useEditorStore((s) => s.activeVP);
+export function ViewportPanel({ id: slotId }: { id: ViewportSlotId }) {
+  const viewId = useEditorStore((s) => s.viewportSlotViews[slotId]);
+  const activeSlot = useEditorStore((s) => s.activeSlot);
   const maximizedVP = useEditorStore((s) => s.maximizedVP);
-  const setActiveVP = useEditorStore((s) => s.setActiveVP);
-  const isActive = activeVP === id || maximizedVP === id;
+  const setActiveSlot = useEditorStore((s) => s.setActiveSlot);
+  const isActive = activeSlot === slotId || maximizedVP === slotId;
 
   return (
     <div
       className={`vp-panel ${isActive ? 'vp-panel--active' : ''}`}
-      title={VIEWPORT_LABELS[id]}
-      onPointerDown={() => setActiveVP(id)}
+      title={VIEWPORT_LABELS[viewId]}
+      onPointerDown={() => setActiveSlot(slotId)}
     >
       <div className="vp-panel-body">
-        <span className="vp-view-label">{VIEWPORT_LABELS[id]}</span>
-        {id === '3d' ? <Viewport3D /> : <Viewport2D vpKey={id} />}
+        <ViewportViewPicker slotId={slotId} viewId={viewId} isActive={isActive} />
+        {viewId === '3d' ? (
+          <Viewport3D slotId={slotId} />
+        ) : viewId === 'texture' ? (
+          <ViewportTexture slotId={slotId} />
+        ) : isView2DKey(viewId) ? (
+          <Viewport2D vpKey={viewId} slotId={slotId} />
+        ) : null}
       </div>
     </div>
   );

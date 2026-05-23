@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import { Group, Separator } from 'react-resizable-panels';
 import { useEditorStore } from '@/store/editorStore';
+import { allViewport2DSizesMeasured } from '@/systems/viewport/viewportSizes';
 import type { ViewportLayoutId } from '@/systems/viewport/viewportLayout';
 import {
   panelsExpandedWhenMaximized,
@@ -132,11 +133,95 @@ function Focus3dLayout() {
   );
 }
 
+function OrthoVerticalLayout() {
+  return (
+    <Group
+      id="meshmaker-ortho-v"
+      orientation="vertical"
+      className="viewport-panel-group"
+      defaultLayout={{ top: 34, front: 33, side: 33 }}
+      onLayoutChanged={notifyViewportResize}
+    >
+      <VpPanel id="top" defaultSize="34%" onResize={notifyViewportResize} />
+      <VpSeparator />
+      <VpPanel id="front" defaultSize="33%" onResize={notifyViewportResize} />
+      <VpSeparator />
+      <VpPanel id="side" defaultSize="33%" onResize={notifyViewportResize} />
+    </Group>
+  );
+}
+
+function OrthoHorizontalLayout() {
+  return (
+    <Group
+      id="meshmaker-ortho-h"
+      orientation="horizontal"
+      className="viewport-panel-group"
+      defaultLayout={{ top: 34, front: 33, side: 33 }}
+      onLayoutChanged={notifyViewportResize}
+    >
+      <VpPanel id="top" defaultSize="34%" onResize={notifyViewportResize} />
+      <VpSeparator />
+      <VpPanel id="front" defaultSize="33%" onResize={notifyViewportResize} />
+      <VpSeparator />
+      <VpPanel id="side" defaultSize="33%" onResize={notifyViewportResize} />
+    </Group>
+  );
+}
+
+function OrthoLeft3dLayout() {
+  return (
+    <Group
+      id="meshmaker-ortho-left3d"
+      orientation="horizontal"
+      className="viewport-panel-group"
+      defaultLayout={{ 'ortho-column': 42, '3d': 58 }}
+      onLayoutChanged={notifyViewportResize}
+    >
+      <VpGroupPanel id="ortho-column" defaultSize="42%" onResize={notifyViewportResize}>
+        <Group
+          id="meshmaker-ortho-left-stack"
+          orientation="vertical"
+          style={nestedGroupStyle}
+          defaultLayout={{ top: 34, front: 33, side: 33 }}
+          onLayoutChanged={notifyViewportResize}
+        >
+          <VpPanel id="top" defaultSize="34%" onResize={notifyViewportResize} />
+          <VpSeparator />
+          <VpPanel id="front" defaultSize="33%" onResize={notifyViewportResize} />
+          <VpSeparator />
+          <VpPanel id="side" defaultSize="33%" onResize={notifyViewportResize} />
+        </Group>
+      </VpGroupPanel>
+      <VpSeparator />
+      <VpPanel id="3d" defaultSize="58%" onResize={notifyViewportResize} />
+    </Group>
+  );
+}
+
+function Single3dLayout() {
+  return (
+    <Group
+      id="meshmaker-single-3d"
+      orientation="vertical"
+      className="viewport-panel-group"
+      defaultLayout={{ '3d': 100 }}
+      onLayoutChanged={notifyViewportResize}
+    >
+      <VpPanel id="3d" defaultSize="100%" onResize={notifyViewportResize} />
+    </Group>
+  );
+}
+
 const LAYOUTS: Record<ViewportLayoutId, () => React.ReactElement> = {
   quad: QuadLayout,
   horizontal: HorizontalLayout,
   vertical: VerticalLayout,
   focus3d: Focus3dLayout,
+  orthoVertical: OrthoVerticalLayout,
+  orthoHorizontal: OrthoHorizontalLayout,
+  orthoLeft3d: OrthoLeft3dLayout,
+  single3d: Single3dLayout,
 };
 
 export function ViewportArea() {
@@ -163,6 +248,33 @@ export function ViewportArea() {
       .join('');
     return `${hideRules}${showRules}${ancestorRules}`;
   }, [maximizedVP, viewportLayout]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+
+    const tryInitialFrame = () => {
+      if (cancelled || attempts > 120) return;
+      attempts += 1;
+      if (allViewport2DSizesMeasured()) {
+        useEditorStore.getState().frameAll();
+        window.setTimeout(() => {
+          if (!cancelled) useEditorStore.getState().frameAll();
+        }, 250);
+        return;
+      }
+      window.requestAnimationFrame(tryInitialFrame);
+    };
+
+    const frameId = window.setTimeout(() => {
+      window.requestAnimationFrame(tryInitialFrame);
+    }, 50);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(frameId);
+    };
+  }, []);
 
   useEffect(() => {
     const id = window.setTimeout(notifyViewportResize, 50);

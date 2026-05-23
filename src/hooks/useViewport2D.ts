@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
 import { VIEW2D_DEFS, s2w, type View2DKey } from '@/core/math/projection';
 import { drawSceneView2D } from '@/systems/viewport/drawView2D';
-import { buildSceneRenderEntries } from '@/systems/scene/sceneObjectHelpers';
+import { buildSceneRenderEntries, getActiveSceneEntry, meshForViewportPick } from '@/systems/scene/sceneObjectHelpers';
 import { useEditorStore } from '@/store/editorStore';
 import { editorEvents } from '@/core/events/EventBus';
 import { SnapshotCommand } from '@/core/commands/Command';
-import {
-  screenToWorld,
+import { screenToWorld,
   updatePrimDrag,
   constrainPrimDrawBounds,
   resolvePrimDragRelease,
   isClickNotDrag,
   adjustPrimDrawExtentByWheel,
+  footprintSquareAxes,
+  lastPrimSizeForDraw,
 } from '@/hooks/primDrawHelpers';
 import {
   applyHandleDrag,
@@ -50,11 +52,45 @@ import {
   canStartModelingDrag,
   createModelingDragState,
   isModelingTool,
+  startModalModelingDrag,
   tryStartModelingDrag,
 } from '@/hooks/modelingDrag';
 import { isMarqueeDone, useMarqueeRect } from '@/hooks/marqueeState';
 import { useSceneRevision } from '@/hooks/useSceneRevision';
+import { syncViewport2DToSize, frame2DViewportAtSize } from '@/systems/viewport/viewportFrame';
+import { setViewport2DSize } from '@/systems/viewport/viewportSizes';
+import { sceneWorldBounds } from '@/systems/scene/sceneObjectHelpers';
+import {
+  addKnifePoint,
+  createKnifeDrawState,
+  withKnifeHover,
+} from '@/systems/mesh/knifeDraw';
+import { pickKnifePoint2D } from '@/systems/mesh/knifePick';
+import { knifePointToLocal } from '@/hooks/knifeHelpers';
 import type { EdgeKey } from '@/systems/selection/selectionSystem';
+import {
+  beginLoopCutDrag,
+  createLoopCutDragState,
+  loopCutTFromDrag,
+  resetLoopCutDrag,
+} from '@/hooks/loopCutDrag';
+import { edgeSlideAmountFromDrag } from '@/systems/mesh/edgeSlide';
+import { mirrorOffsetFromDrag } from '@/systems/mesh/mirrorGeometry';
+import { computeSelectionWorldPivot, type GizmoMode } from '@/systems/viewport/transformGizmo3D';
+import {
+  applyGizmoDragToPivot2D,
+  capturePivotTransform,
+  gizmoModeToControlsMode,
+  hitTestTransformGizmo2D,
+  syncPivotToWorld,
+  type GizmoAxis,
+} from '@/systems/viewport/transformGizmo2D';
+import {
+  applyTransformControlsChange,
+  beginTransformControlsDrag,
+  commitTransformControlsDrag,
+  createTransformControlsSession,
+} from '@/systems/viewport/transformControlsBridge';
 
 export function useViewport2D(vpKey: View2DKey) {
   const renderTick = useSceneRevision();
@@ -80,9 +116,37 @@ export function useViewport2D(vpKey: View2DKey) {
     dragStart: { bounds: BoundingBox; world: Vec3 } | null;
   }>({ active: false, mode: 'create-base', anchor: null, screen: null, handle: null, dragStart: null });
   const [primHandleId, setPrimHandleId] = useState<string | null>(null);
+  const [gizmoHoverAxis, setGizmoHoverAxis] = useState<GizmoAxis | null>(null);
+
+  const pivotObjectRef = useRef(new THREE.Object3D());
+  const transformSessionRef = useRef(createTransformControlsSession());
+  const gizmoDragRef = useRef<{
+    active: boolean;
+    axis: GizmoAxis | null;
+    mode: GizmoMode | null;
+    startScreen: { x: number; y: number } | null;
+    startPosition: THREE.Vector3 | null;
+    startQuaternion: THREE.Quaternion | null;
+    startScale: THREE.Vector3 | null;
+    pivotWorld: { x: number; y: number; z: number } | null;
+  }>({
+    active: false,
+    axis: null,
+    mode: null,
+    startScreen: null,
+    startPosition: null,
+    startQuaternion: null,
+    startScale: null,
+    pivotWorld: null,
+  });
 
   const dragRef = useRef(createTransformDragState());
   const modelingDragRef = useRef(createModelingDragState());
+  const loopCutDragRef = useRef(createLoopCutDragState());
+  const edgeSlideDragRef = useRef(createLoopCutDragState());
+  const mirrorDragRef = useRef(createLoopCutDragState());
+  const lastSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const renderRef = useRef<() => void>(() => {});
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -101,6 +165,14 @@ export function useViewport2D(vpKey: View2DKey) {
       state.activeMeshId,
       state.selectedNodeIds,
     );
+    const gizmoTool: GizmoMode | null =
+      isTransformTool(state.tool) && !state.primDraw ? (state.tool as GizmoMode) : null;
+    const gizmoPivot = gizmoTool ? computeSelectionWorldPivot() : null;
+    const gizmo =
+      gizmoTool && gizmoPivot
+        ? { mode: gizmoTool, pivot: gizmoPivot, hoverAxis: gizmoHoverAxis }
+        : null;
+
     drawSceneView2D(
       ctx,
       canvas.width,
@@ -121,8 +193,12 @@ export function useViewport2D(vpKey: View2DKey) {
         showGrid: state.showGrid3D,
       },
       primHandleId,
+      state.knifeDraw,
+      gizmo,
     );
-  }, [vpKey, selRect, primHandleId]);
+  }, [vpKey, selRect, primHandleId, gizmoHoverAxis]);
+
+  renderRef.current = render;
 
   useEffect(() => {
     render();
@@ -132,10 +208,47 @@ export function useViewport2D(vpKey: View2DKey) {
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const ro = new ResizeObserver(render);
+
+    const fitToSize = (mode: 'resize' | 'frame' = 'resize') => {
+      const w = Math.max(1, container.clientWidth);
+      const h = Math.max(1, container.clientHeight);
+      if (w < 8 || h < 8) return;
+
+      setViewport2DSize(vpKey, w, h);
+
+      const state = useEditorStore.getState();
+      const vp = state.vp2d[vpKey];
+
+      if (mode === 'frame') {
+        const bounds = sceneWorldBounds(state.sceneGraph, state.meshes);
+        const mesh = state.hasSceneObjects() ? state.getActiveMesh() : null;
+        state.setVp2d(vpKey, frame2DViewportAtSize(vpKey, w, h, bounds, mesh));
+      } else if (vp.viewSize) {
+        const synced = syncViewport2DToSize(vp, { w, h });
+        if (
+          synced.pan.x !== vp.pan.x ||
+          synced.pan.y !== vp.pan.y ||
+          synced.zoom !== vp.zoom ||
+          synced.viewSize?.w !== vp.viewSize?.w ||
+          synced.viewSize?.h !== vp.viewSize?.h
+        ) {
+          state.setVp2d(vpKey, synced);
+        }
+      }
+
+      lastSizeRef.current = { w, h };
+      renderRef.current();
+    };
+
+    const ro = new ResizeObserver(() => fitToSize('resize'));
     ro.observe(container);
-    return () => ro.disconnect();
-  }, [render]);
+    fitToSize('resize');
+    const offFrame = editorEvents.on('viewport:frame2d', () => fitToSize('frame'));
+    return () => {
+      ro.disconnect();
+      offFrame();
+    };
+  }, [vpKey]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -157,6 +270,7 @@ export function useViewport2D(vpKey: View2DKey) {
       const sx = e.clientX - r.left;
       const sy = e.clientY - r.top;
       const vp = state.vp2d[vpKey];
+      const viewSize = lastSizeRef.current ?? vp.viewSize ?? { w: r.width, h: r.height };
       const before = s2w(sx, sy, vp.pan, vp.zoom);
       const f = e.deltaY > 0 ? 0.85 : 1 / 0.85;
       const zoom = Math.max(0.04, Math.min(40, vp.zoom * f));
@@ -167,6 +281,7 @@ export function useViewport2D(vpKey: View2DKey) {
           x: vp.pan.x + (after.x - before.x) * zoom,
           y: vp.pan.y + (after.y - before.y) * zoom,
         },
+        viewSize,
       });
       state.notifyChange();
     };
@@ -179,6 +294,16 @@ export function useViewport2D(vpKey: View2DKey) {
       const state = useEditorStore.getState();
       const vd = VIEW2D_DEFS[vpKey];
       const vpState = state.vp2d[vpKey];
+      const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+      if (!pickMesh) {
+        if (
+          supportsSelectionMarquee(state.tool) &&
+          effectiveSelectionMode(state.tool, state.selectionMode) === 'object'
+        ) {
+          state.applyObjectClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+        }
+        return;
+      }
       const mesh = state.getActiveMesh();
       const visibleVerts = visibleVertexIndices(mesh);
       const wc = s2w(sx, sy, vpState.pan, vpState.zoom);
@@ -199,7 +324,7 @@ export function useViewport2D(vpKey: View2DKey) {
       if (state.tool === 'vertex') {
         let placedVertex = -1;
         state.runCommand('Add Vertex', () => {
-          const vi = nearestVertex2D(sx, sy, vpKey, mesh, vpState, { visibleVertices: visibleVerts });
+          const vi = nearestVertex2D(sx, sy, vpKey, pickMesh, vpState, { visibleVertices: visibleVerts });
           if (vi < 0) {
             placedVertex = mesh.vertices.length;
             mesh.vertices.push({ x: wp3.x, y: wp3.y, z: wp3.z });
@@ -226,7 +351,7 @@ export function useViewport2D(vpKey: View2DKey) {
           }
         }
       } else if (state.tool === 'face') {
-        const vi = nearestVertex2D(sx, sy, vpKey, mesh, vpState, { visibleVertices: visibleVerts });
+        const vi = nearestVertex2D(sx, sy, vpKey, pickMesh, vpState, { visibleVertices: visibleVerts });
         if (vi >= 0) {
           const wip = [...state.wipFace];
           if (wip.length >= 3 && wip[0] === vi) {
@@ -246,7 +371,7 @@ export function useViewport2D(vpKey: View2DKey) {
         if (mode === 'object') {
           state.applyObjectClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
         } else {
-          state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+          state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey, e.altKey);
         }
       }
     },
@@ -265,6 +390,65 @@ export function useViewport2D(vpKey: View2DKey) {
       dragRef.current.mouseDownPos = { x: sx, y: sy };
       dragRef.current.isDragging = false;
       state.setActiveVP(vpKey);
+
+      if (state.armedModeling && isModelingTool(state.tool)) {
+        if (startModalModelingDrag(modelingDragRef.current, state.tool, sx, sy)) {
+          return;
+        }
+        state.clearArmedModeling();
+      }
+
+      if (state.armedModeling === 'loopcut' && state.loopCutPreview && e.button === 0) {
+        beginLoopCutDrag(loopCutDragRef.current, sx, sy, state.loopCutPreview.t);
+        return;
+      }
+
+      if (state.armedModeling === 'edgeslide' && state.edgeSlidePreview && e.button === 0) {
+        beginLoopCutDrag(edgeSlideDragRef.current, sx, sy, state.edgeSlidePreview.amount);
+        return;
+      }
+
+      if (state.armedModeling === 'mirror' && state.mirrorPreview && e.button === 0) {
+        beginLoopCutDrag(mirrorDragRef.current, sx, sy, state.mirrorPreview.offset);
+        return;
+      }
+
+      if (state.tool === 'knife' && state.selectionMode !== 'object' && e.button === 0) {
+        const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+        if (!pickMesh) return;
+        const mesh = state.getActiveMesh();
+        const entry = getActiveSceneEntry(state.sceneGraph, state.meshes, state.activeMeshId);
+        const transform = entry?.transform ?? {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        };
+        const vpState = state.vp2d[vpKey];
+        const visibleVerts = visibleVertexIndices(mesh);
+        const visibleFaces = visibleFaceIndices(mesh);
+        const draw = state.knifeDraw?.view === vpKey ? state.knifeDraw : createKnifeDrawState(vpKey);
+        const worldPoint = pickKnifePoint2D(
+          vpKey,
+          pickMesh,
+          sx,
+          sy,
+          vpState,
+          visibleVerts,
+          visibleFaces,
+          draw.points,
+          {
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey || e.metaKey,
+            snap: state.snap,
+          },
+        );
+        if (!worldPoint) return;
+        const point = knifePointToLocal(worldPoint, transform);
+        const next = addKnifePoint(withKnifeHover(draw, point), point);
+        if (!next) return;
+        state.setKnifeDraw(next);
+        return;
+      }
 
       if (state.primDraw && e.button === 0) {
         const vpState = state.vp2d[vpKey];
@@ -323,12 +507,67 @@ export function useViewport2D(vpKey: View2DKey) {
       }
 
       const vpState = state.vp2d[vpKey];
+      const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+      if (!pickMesh) {
+        if (supportsSelectionMarquee(state.tool)) {
+          beginMarquee(
+            sx,
+            sy,
+            (rect, shiftKey, ctrlKey) => {
+              const fresh = useEditorStore.getState();
+              if (supportsSelectionMarquee(fresh.tool)) {
+                fresh.applyBoxSelection(vpKey, rect, shiftKey, ctrlKey);
+              }
+            },
+            containerRef.current,
+          );
+        }
+        return;
+      }
       const mesh = state.getActiveMesh();
       const visibleVerts = visibleVertexIndices(mesh);
       const visibleFaces = visibleFaceIndices(mesh);
-      const viPick = nearestVertex2D(sx, sy, vpKey, mesh, vpState, {
+      const viPick = nearestVertex2D(sx, sy, vpKey, pickMesh, vpState, {
         visibleVertices: visibleVerts,
       });
+
+      if (isTransformTool(state.tool) && !state.primDraw) {
+        const gizmoMode = state.tool as GizmoMode;
+        const pivot = computeSelectionWorldPivot();
+        if (pivot) {
+          const axis = hitTestTransformGizmo2D(
+            vpKey,
+            gizmoMode,
+            pivot,
+            vpState.pan,
+            vpState.zoom,
+            sx,
+            sy,
+          );
+          if (axis) {
+            const pivotObj = pivotObjectRef.current;
+            syncPivotToWorld(pivotObj, pivot);
+            beginTransformControlsDrag(
+              transformSessionRef.current,
+              pivotObj,
+              gizmoModeToControlsMode(gizmoMode),
+            );
+            const captured = capturePivotTransform(pivotObj);
+            gizmoDragRef.current = {
+              active: true,
+              axis,
+              mode: gizmoMode,
+              startScreen: { x: sx, y: sy },
+              startPosition: captured.position,
+              startQuaternion: captured.quaternion,
+              startScale: captured.scale,
+              pivotWorld: pivot,
+            };
+            setGizmoHoverAxis(axis);
+            return;
+          }
+        }
+      }
 
       if (isTransformTool(state.tool)) {
         if (
@@ -374,10 +613,10 @@ export function useViewport2D(vpKey: View2DKey) {
         if (isModelingTool(state.tool)) {
           let hitSelected = false;
           if (state.tool === 'extrude' || state.tool === 'inset') {
-            const fi = nearestFace2D(sx, sy, vpKey, mesh, vpState, { visibleFaces });
+            const fi = nearestFace2D(sx, sy, vpKey, pickMesh, vpState, { visibleFaces });
             hitSelected = fi >= 0 && state.selFaces.has(fi);
           } else if (state.tool === 'bevel') {
-            const edge = nearestEdge2D(sx, sy, vpKey, mesh, vpState, {
+            const edge = nearestEdge2D(sx, sy, vpKey, pickMesh, vpState, {
               visibleVertices: visibleVerts,
               visibleFaces,
             });
@@ -414,17 +653,86 @@ export function useViewport2D(vpKey: View2DKey) {
       const sy = e.clientY - r.top;
       const vpState = state.vp2d[vpKey];
 
+      if (
+        loopCutDragRef.current.isDragging &&
+        state.loopCutPreview &&
+        loopCutDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - loopCutDragRef.current.mouseDownPos.y;
+        state.updateLoopCutT(loopCutTFromDrag(dy, loopCutDragRef.current.startT));
+        return;
+      }
+
+      if (
+        edgeSlideDragRef.current.isDragging &&
+        state.edgeSlidePreview &&
+        edgeSlideDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - edgeSlideDragRef.current.mouseDownPos.y;
+        state.updateEdgeSlideAmount(edgeSlideAmountFromDrag(dy, edgeSlideDragRef.current.startT));
+        return;
+      }
+
+      if (
+        mirrorDragRef.current.isDragging &&
+        state.mirrorPreview &&
+        mirrorDragRef.current.mouseDownPos
+      ) {
+        const dy = sy - mirrorDragRef.current.mouseDownPos.y;
+        state.updateMirrorPreview({
+          offset: mirrorOffsetFromDrag(dy, mirrorDragRef.current.startT),
+        });
+        return;
+      }
+
+      if (state.tool === 'knife' && state.selectionMode !== 'object') {
+        const pickMesh = meshForViewportPick(state.sceneGraph, state.meshes, state.activeMeshId);
+        if (!pickMesh) return;
+        const mesh = state.getActiveMesh();
+        const entry = getActiveSceneEntry(state.sceneGraph, state.meshes, state.activeMeshId);
+        const transform = entry?.transform ?? {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        };
+        const vpState = state.vp2d[vpKey];
+        const visibleVerts = visibleVertexIndices(mesh);
+        const visibleFaces = visibleFaceIndices(mesh);
+        const draw = state.knifeDraw?.view === vpKey ? state.knifeDraw : createKnifeDrawState(vpKey);
+        const worldHover = pickKnifePoint2D(
+          vpKey,
+          pickMesh,
+          sx,
+          sy,
+          vpState,
+          visibleVerts,
+          visibleFaces,
+          draw.points,
+          {
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey || e.metaKey,
+            snap: state.snap,
+          },
+        );
+        const hover = worldHover ? knifePointToLocal(worldHover, transform) : null;
+        state.setKnifeDraw(withKnifeHover(draw, hover));
+        return;
+      }
+
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         let p1 = screenToWorld(vpKey, sx, sy, vpState, state.snap);
         const drag = primDragRef.current;
 
         if (drag.mode === 'handle' && drag.handle) {
+          const modifiers = { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey };
           const nextBounds = applyHandleDrag(
             drag.dragStart?.bounds ?? state.primDraw.bounds,
             drag.handle,
             p1,
             state.snap,
             drag.dragStart ?? undefined,
+            modifiers,
+            state.primDraw.phase === 'base' ? footprintSquareAxes(state.primDraw) : undefined,
           );
           state.setPrimDraw(
             constrainPrimDrawBounds({ ...state.primDraw, bounds: nextBounds, cursor: p1 }),
@@ -443,7 +751,10 @@ export function useViewport2D(vpKey: View2DKey) {
               : (sx - start.x) / vpState.zoom;
           p1 = { ...anchor, [axis]: state.snap(anchor[axis] + raw) };
         }
-        const updated = updatePrimDrag(state.primDraw, vpKey, anchor, p1);
+        const updated = updatePrimDrag(state.primDraw, vpKey, anchor, p1, {
+          shiftKey: e.shiftKey,
+          ctrlKey: e.ctrlKey,
+        });
         state.setPrimDraw(updated);
         return;
       }
@@ -466,9 +777,66 @@ export function useViewport2D(vpKey: View2DKey) {
         containerRef.current.style.cursor = '';
       }
 
+      if (gizmoDragRef.current.active && gizmoDragRef.current.axis && gizmoDragRef.current.mode) {
+        const g = gizmoDragRef.current;
+        const gizmoMode = g.mode!;
+        const gizmoAxis = g.axis!;
+        if (
+          g.startScreen &&
+          g.startPosition &&
+          g.startQuaternion &&
+          g.startScale &&
+          g.pivotWorld
+        ) {
+          applyGizmoDragToPivot2D(
+            pivotObjectRef.current,
+            gizmoMode,
+            gizmoAxis,
+            vpKey,
+            g.pivotWorld,
+            vpState.pan,
+            vpState.zoom,
+            g.startScreen,
+            sx,
+            sy,
+            g.startPosition,
+            g.startQuaternion,
+            g.startScale,
+          );
+          applyTransformControlsChange(transformSessionRef.current, pivotObjectRef.current);
+        }
+        return;
+      }
+
+      if (
+        isTransformTool(state.tool) &&
+        !state.primDraw &&
+        !panningRef.current &&
+        !gizmoDragRef.current.active
+      ) {
+        const gizmoMode = state.tool as GizmoMode;
+        const pivot = computeSelectionWorldPivot();
+        if (pivot) {
+          const axis = hitTestTransformGizmo2D(
+            vpKey,
+            gizmoMode,
+            pivot,
+            vpState.pan,
+            vpState.zoom,
+            sx,
+            sy,
+          );
+          if (axis !== gizmoHoverAxis) setGizmoHoverAxis(axis);
+        } else if (gizmoHoverAxis) {
+          setGizmoHoverAxis(null);
+        }
+      }
+
       if (panningRef.current) {
+        const viewSize = lastSizeRef.current ?? undefined;
         state.setVp2d(vpKey, {
           pan: { x: e.clientX - panStartRef.current.x, y: e.clientY - panStartRef.current.y },
+          ...(viewSize ? { viewSize } : {}),
         });
         state.notifyChange();
         return;
@@ -543,6 +911,27 @@ export function useViewport2D(vpKey: View2DKey) {
       const marqueeApplied = !!liveMarquee && isMarqueeDone(liveMarquee);
       if (isMarqueeActive()) endMarquee(e.shiftKey, e.ctrlKey);
 
+      if (loopCutDragRef.current.isDragging) {
+        state.commitLoopCutPreview();
+        resetLoopCutDrag(loopCutDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
+      if (edgeSlideDragRef.current.isDragging) {
+        state.commitEdgeSlidePreview();
+        resetLoopCutDrag(edgeSlideDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
+      if (mirrorDragRef.current.isDragging) {
+        state.commitMirrorPreview();
+        resetLoopCutDrag(mirrorDragRef.current);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
       if (primDragRef.current.active && state.primDraw && primDragRef.current.anchor) {
         const min = state.snapSize;
         const draw = state.primDraw;
@@ -560,6 +949,7 @@ export function useViewport2D(vpKey: View2DKey) {
           vpKey,
           clickPoint,
           pointerMoved,
+          lastPrimSizeForDraw(state.lastPrimSizes, draw.type),
         );
         if (next) {
           state.setPrimDraw(next);
@@ -577,6 +967,23 @@ export function useViewport2D(vpKey: View2DKey) {
         return;
       }
 
+      if (gizmoDragRef.current.active) {
+        commitTransformControlsDrag(transformSessionRef.current);
+        gizmoDragRef.current = {
+          active: false,
+          axis: null,
+          mode: null,
+          startScreen: null,
+          startPosition: null,
+          startQuaternion: null,
+          startScale: null,
+          pivotWorld: null,
+        };
+        setGizmoHoverAxis(null);
+        dragRef.current.mouseDownPos = null;
+        return;
+      }
+
       const drag = dragRef.current;
       const mDrag = modelingDragRef.current;
       const moved =
@@ -586,13 +993,18 @@ export function useViewport2D(vpKey: View2DKey) {
       if (
         !marqueeApplied &&
         !state.primDraw &&
+        !state.loopCutPreview &&
+        !state.edgeSlidePreview &&
+        !state.mirrorPreview &&
+        !state.knifeDraw &&
+        state.tool !== 'knife' &&
         !drag.isDragging &&
         !mDrag.isDragging &&
         !moved &&
         drag.mouseDownPos
       ) {
         if (isModelingTool(state.tool)) {
-          state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey);
+          state.applyClickSelection(vpKey, sx, sy, e.shiftKey, e.ctrlKey, e.altKey);
         } else {
           handleVpClick(e, sx, sy);
         }
@@ -635,6 +1047,12 @@ export function useViewport2D(vpKey: View2DKey) {
             state.notifyChange();
           }),
         );
+        if (state.tool === 'inset' || state.tool === 'extrude') {
+          state.setSelFaces(new Set(mDrag.targetFaces));
+        } else if (state.tool === 'bevel') {
+          state.setSelEdges(new Set(mDrag.targetEdges));
+        }
+        state.clearArmedModeling();
       }
       modelingDragRef.current = createModelingDragState();
 
@@ -646,6 +1064,20 @@ export function useViewport2D(vpKey: View2DKey) {
     onMouseLeave: () => {
       panningRef.current = false;
       clearMarquee();
+      if (gizmoDragRef.current.active) {
+        commitTransformControlsDrag(transformSessionRef.current);
+        gizmoDragRef.current = {
+          active: false,
+          axis: null,
+          mode: null,
+          startScreen: null,
+          startPosition: null,
+          startQuaternion: null,
+          startScale: null,
+          pivotWorld: null,
+        };
+        setGizmoHoverAxis(null);
+      }
       if (primDragRef.current.active) {
         primDragRef.current = {
           ...primDragRef.current,
@@ -654,6 +1086,13 @@ export function useViewport2D(vpKey: View2DKey) {
       }
       dragRef.current.transformPending = false;
       dragRef.current.isDragging = false;
+    },
+    onDoubleClick: (e: React.MouseEvent) => {
+      if (e.button !== 0) return;
+      const state = useEditorStore.getState();
+      if (state.selectionMode === 'object') return;
+      if (state.primDraw || state.knifeDraw) return;
+      state.selectLinked();
     },
   };
 

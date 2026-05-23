@@ -48,6 +48,7 @@ export function LeftPanel() {
   const [tz, setTz] = useState(0);
 
   const updateTransformFromSelection = () => {
+    if (!mesh.vertices.length) return;
     const selectedVerts = selectedTransformVerts();
     if (selectedVerts.size > 0) {
       const arr = [...selectedVerts].map((i) => mesh.vertices[i]);

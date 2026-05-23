@@ -24,6 +24,15 @@ export interface MaterialDef {
   opacity: number;
 }
 
+export interface TextureMap {
+  width: number;
+  height: number;
+  dataUrl: string;
+}
+
+/** Per-face UV: vertex index → normalized atlas coords (v down, canvas-style). */
+export type FaceUvMap = Record<number, { u: number; v: number }>;
+
 export interface BoneDef {
   name: string;
   pos: Vec3;
@@ -40,6 +49,10 @@ export interface MeshDocument {
   activeLayerId: string;
   groups: FaceGroup[];
   materials: MaterialDef[];
+  /** Shared pixel-art texture atlas for this mesh. */
+  texture?: TextureMap;
+  /** UV layout parallel to faces[]. */
+  faceUvs: (FaceUvMap | null)[];
   bones: BoneDef[];
 }
 
@@ -62,6 +75,7 @@ export function createMeshDocument(name = 'Mesh'): MeshDocument {
     activeLayerId: baseLayer.id,
     groups: [{ name: 'Group 1', faces: [], color: GROUP_COLORS[0] }],
     materials: [{ name: 'Material 1', color: GROUP_COLORS[0], opacity: 0.9 }],
+    faceUvs: [],
     bones: [],
   };
 }
@@ -77,6 +91,8 @@ export function cloneMeshDocument(doc: MeshDocument): MeshDocument {
     activeLayerId: doc.activeLayerId,
     groups: doc.groups.map((g) => ({ ...g, faces: [...g.faces] })),
     materials: doc.materials.map((m) => ({ ...m })),
+    texture: doc.texture ? { ...doc.texture } : undefined,
+    faceUvs: (doc.faceUvs ?? []).map((uv) => (uv ? { ...uv } : null)),
     bones: doc.bones.map((b) => ({ ...b, pos: cloneVec3(b.pos) })),
   };
 }
